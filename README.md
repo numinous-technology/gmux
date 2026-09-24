@@ -140,35 +140,30 @@ separate cards. The full picture is in [docs/isolation.md](docs/isolation.md).
 
 ## Benchmark
 
-Each job runs a sustained fp16 8192-square matmul, long enough that
-concurrent jobs genuinely overlap. Reproduce with `bench/run.sh`.
+Each job runs a sustained fp16 8192-square matmul for 20 seconds, long enough
+that concurrent jobs genuinely overlap. Numbers are TFLOP/s per job, measured
+through gmux on real cards. Reproduce with `bench/run.sh`.
 
-NVIDIA L40S (46 GB), MPS caps:
+| Card | Whole card, no gmux | 1/4 share alone | Four 1/4 shares at once, each | Memory cap on a 1/4 share |
+|---|---|---|---|---|
+| NVIDIA H100 80 GB | 662.0 | 215.1 | 157.7 to 158.1 | 19 GiB: 17 allocates, 20 refused |
+| NVIDIA B300 288 GB | 1284.3 | 549.1 | 289.6 to 290.0 | 67 GiB: 60 allocates, 73 refused |
+| NVIDIA L40S 46 GB | 171.6 | 81.1 | 32.7 | 10.6 GiB visible to the job |
+| AMD MI355X 288 GB | 1264.1 | 452.0 to 457.8 | 242.5 to 242.8 | 71 GiB: 63 allocates, 78 refused |
+| AMD MI350X 288 GB | 1024.4 | 416.5 to 419.0 | 194.1 to 194.4 | 71 GiB: 63 allocates, 78 refused |
+| AMD MI325X 256 GB | 741.9 | 256.6 to 257.4 | 119.4 to 119.8 | 64 GB: 60 allocates, 70 refused |
 
-| Setup | TFLOP/s per job | GPU memory the job can see |
-|---|---|---|
-| One job, whole card, no gmux | 171.6 | 43.4 GiB |
-| One 1/4 share, alone on an idle card | 81.1 | 10.6 GiB |
-| Four 1/4 shares at once | 32.7, 32.7, 32.7, 32.7 | 10.6 GiB each |
-
-AMD MI325X (256 GB), compute-unit partitions and the memory shim:
-
-| Setup | TFLOP/s per job | Memory limit |
-|---|---|---|
-| One job, whole card, no gmux | 741.9 | 256 GB |
-| Each 1/4 share alone | 256.6, 256.9, 256.8, 257.4 | 64 GB, enforced |
-| Four 1/4 shares at once | 119.8, 119.5, 119.8, 119.4 | 64 GB each |
-
-Memory caps are hard on both: a quarter share on the MI325X can allocate 60 GB
-and is refused at 70 GB. Shares are fair: concurrent jobs get the same
-throughput. Compute caps hold: a quarter alone cannot take the whole card.
+NVIDIA shares are capped by MPS; AMD shares get their own shader engines on
+every chiplet (the AMD rows show each of the four quarters alone) and a memory
+cap through the preload shim. On every card the memory cap is hard, the split
+between concurrent jobs is even, and a quarter share alone cannot take the
+whole card. Without gmux, every over-limit allocation above succeeds.
 
 Sharing pays when jobs do not fill the card on their own: notebooks, bursty
-evals, small models serving a few requests. A single job that already
-saturates the card, like this matmul, runs fastest alone; four saturating
-shares add up to less than one dedicated job. Transcripts:
-[L40S](docs/evidence/l40s-real-gpu.txt),
-[MI325X](docs/evidence/mi325x-real-gpu.txt).
+evals, small models serving a few requests. A job that already saturates the
+card, like this matmul, runs fastest alone; four saturating quarter shares add
+up to between 64% (MI325X) and 95% (H100) of one dedicated job. Transcripts
+are in [docs/evidence](docs/evidence).
 
 ## How it works
 
@@ -196,12 +191,12 @@ Spatial and temporal sharing, admission, live resize, per-second accounting,
 the network fence, remote command execution, and multi-vendor detection are
 built and covered by tests on every build.
 
-On a real NVIDIA L40S, gmux detects the card, starts MPS, applies each job's
+On real NVIDIA H100, B300 and L40S cards, gmux detects the card, starts MPS, applies each job's
 compute and memory caps, splits the card fairly, and enforces the network
 fence: `--deny-net` blocks everything, and `--allow` resolves and connects to
 allowlisted hosts while refusing the rest.
 
-On a real AMD MI325X, gmux selects the card by UUID, gives each job its own
+On real AMD MI325X, MI350X and MI355X cards, gmux selects the card by UUID, gives each job its own
 shader engines on every chiplet (checked with a compute-unit probe, see
 `bench/cuprobe.hip`), and caps HIP allocations through the preload shim, with
 PyTorch.

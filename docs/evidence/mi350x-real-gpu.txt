@@ -1,0 +1,35 @@
+gmux on a DigitalOcean mi350x GPU droplet, 2026-09-24. Produced by bench scripts (sustained fp16 8192^2 matmul, 20 s per job).
+
+##### host
+{"card0": {"Card Series": "AMD Instinct MI350X VF", "Card Model": "0x75b0", "Card Vendor": "Advanced Micro Devices, Inc. [AMD/ATI]", "Card SKU": "N/A", "Subsystem ID": "0x75a0", "Device Rev": "0x00", "Node ID": "1", "GUID": "29921", "GFX Version": "gfx950"}}
+
+  Marketing Name:          AMD EPYC 9575F 64-Core Processor   
+  Compute Unit:            24                                 
+  Name:                    gfx950                             
+  Marketing Name:          AMD Instinct MI350X VF             
+  Compute Unit:            256                                
+Seccomp:	0
+##### python + torch
+torch 2.13.0+rocm7.1 AMD Radeon Graphics
+##### gmux
+CARD  VENDOR  GPU                     MEMORY  ENFORCES
+0     amd     AMD Instinct MI350X VF  287.7G  concurrent, compute cap, memory cap
+array_count 32 simd_arrays_per_engine 1 cu_per_simd_array 9 num_xcc 8 
+##### benchmark (TFLOP/s, GiB visible)
+whole card, no gmux: 1024.4 286.6
+1/4 share alone on seats 0-1: 418.1 286.6
+1/4 share alone on seats 2-3: 417.7 286.6
+1/4 share alone on seats 4-5: 419.0 286.6
+1/4 share alone on seats 6-7: 416.5 286.6
+four 1/4 shares at once: 194.4 194.1 194.2 194.3 | visible 284.2 GiB each
+##### memory cap
+0.25 share env: LIMIT 73648
+under gmux (limit 71 GiB): 63GiB:ok 78GiB:refused(OutOfMemoryError)
+without gmux: 63GiB:ok 78GiB:ok
+##### where each 1/4 share runs (chiplet x engine unit counts)
+whole card: XCDxSE: [8,8,8,8] [8,8,8,8] [8,8,8,8] [8,8,8,8] [8,8,8,8] [8,8,8,8] [8,8,8,8] [8,8,8,8]  min per SE: 8
+p1:XCDxSE: [8,0,0,0] [8,0,0,0] [8,0,0,0] [8,0,0,0] [8,0,0,0] [8,0,0,0] [8,0,0,0] [8,0,0,0]  min per SE: 0
+p2:XCDxSE: [0,8,0,0] [0,8,0,0] [0,8,0,0] [0,8,0,0] [0,8,0,0] [0,8,0,0] [0,8,0,0] [0,8,0,0]  min per SE: 0
+p3:XCDxSE: [0,0,8,0] [0,0,8,0] [0,0,8,0] [0,0,8,0] [0,0,8,0] [0,0,8,0] [0,0,8,0] [0,0,8,0]  min per SE: 0
+p4:XCDxSE: [0,0,0,8] [0,0,0,8] [0,0,0,8] [0,0,0,8] [0,0,0,8] [0,0,0,8] [0,0,0,8] [0,0,0,8]  min per SE: 0
+##### done

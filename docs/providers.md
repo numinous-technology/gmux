@@ -26,6 +26,10 @@ works on providers that only give you a container.
   through and a normal kernel. Real detection, MPS compute and memory caps,
   the benchmark in the README, `--deny-net`, and the full `--allow` fence all
   work. Transcript: [evidence/l40s-real-gpu.txt](evidence/l40s-real-gpu.txt).
+- **DigitalOcean GPU droplets, NVIDIA H100 and B300; AMD MI350X and MI355X.**
+  Same checks as below: caps, fair split, memory cap, and on AMD the per-job
+  shader-engine partitions confirmed with the CU probe. Transcripts in
+  [evidence](evidence).
 - **DigitalOcean GPU droplet, AMD MI325X.** ROCm on a KVM VM. Detection by
   UUID, per-job shader-engine partitions, and the memory shim under PyTorch all
   work. Transcript: [evidence/mi325x-real-gpu.txt](evidence/mi325x-real-gpu.txt).

@@ -1,0 +1,19 @@
+gmux on a DigitalOcean h100 GPU droplet, 2026-09-24. Produced by bench scripts (sustained fp16 8192^2 matmul, 20 s per job).
+
+##### host
+NVIDIA H100 80GB HBM3, 81559 MiB, 580.173.02
+Seccomp:	0
+##### python + torch
+torch 2.14.0+cu130 NVIDIA H100 80GB HBM3
+##### gmux
+CARD  VENDOR  GPU                    MEMORY  ENFORCES
+0     nvidia  NVIDIA H100 80GB HBM3  79.6G   concurrent, compute cap, memory cap
+##### benchmark (TFLOP/s, GiB visible)
+whole card, no gmux: 662.0 78.1
+1/4 share alone: 215.1 19.2
+four 1/4 shares at once: 157.8 157.7 157.9 158.1 | visible 19.2 GiB each
+##### memory cap
+0.25 share env: LIMIT 0=20389M
+under gmux (limit 19 GiB): 17GiB:ok 20GiB:refused(OutOfMemoryError)
+without gmux: 17GiB:ok 20GiB:ok
+##### done
