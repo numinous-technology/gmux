@@ -1,0 +1,51 @@
+##### setup
+firecracker v1.17.0, kernel, and base image in /opt/fc
+built /opt/fc/rootfs.ext4 (1024 MiB) with the vitvm agent as init
+created sandbox ml (sbx-699b53397ebe) on firecracker, now current
+##### the machine sees the GPU host, and nothing else
+on gpu1
+CARD  VENDOR  GPU                     MEMORY  ENFORCES
+0     amd     AMD Instinct MI350X VF  287.7G  concurrent, compute cap, memory cap
+
+[ck-faee8c5c8429 step 2] exit 0, no file changes +machine
+PASS  gmux inside the machine reaches the GPU host through the tunnel
+CLOSED
+PASS  the machine cannot reach anywhere else
+##### a step runs a GPU job and keeps the result
+[gmux] pulled 1 file(s)
+
+[ck-edb0717308af step 4] exit 0, +1 +machine
+  step 4's out.txt: 415.6 286.6
+PASS  the GPU job's result is in the step's checkpoint
+##### a fork of that step has the result without running the GPU again
+forked ck-edb0717308af into sandbox fork1 (sbx-ffa62816d9fe) on firecracker, warm, the machine resumed from that step; now current
+415.6 286.6
+PASS  the fork has step 4's result
+
+[ck-364b7b18a629 step 2] exit 0, +1 +machine
+  fork's out2.txt: 416.7 286.6
+PASS  the fork can run its own GPU job through its own tunnel
+##### accounting on the GPU host, by sandbox and by step
+OWNER                 GPU-HOURS  MEM GIB-HOURS  HELD
+vit-sbx-699b53397ebe  0.001      0.3            14s
+vit-sbx-ffa62816d9fe  0.001      0.2            9s
+
+[ck-1ededc012d89 step 4] exit 0, no file changes +machine
+JOB                         GPU-HOURS  MEM GIB-HOURS  HELD
+vit-sbx-699b53397ebe-step4  0.001      0.3            14s
+vit-sbx-ffa62816d9fe-step2  0.001      0.2            9s
+
+[ck-2587f8a7f582 step 5] exit 0, no file changes +machine
+PASS  GPU time is recorded for the parent and the fork separately
+PASS  each GPU job is named after its sandbox and step
+##### a GPU job left running at a checkpoint is called out
+vit: 1 gmux job(s) still running as this step is saved; a fork of this step will not carry them:
+  gmux run --share 0.125 -- sleep 20
+
+[ck-e7622cd5b011 step 6] exit 0, no file changes +machine
+PASS  the step warns that a gmux job is still running
+##### stop, then run: the tunnel comes back
+on gpu1
+CARD  VENDOR  GPU                     MEMORY  ENFORCES
+PASS  after stop and run the machine reaches its GPU host again
+##### result: 9 passed, 0 failed

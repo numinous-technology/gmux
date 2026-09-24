@@ -167,6 +167,30 @@ card directly. That is deliberate. The caps and the fence run next to the card,
 where they can be enforced, and a round trip per command, not per CUDA call,
 is what makes it work over an ordinary network.
 
+## Inside vitvm machines
+
+Its sister project [vitvm](https://github.com/numinous-technology/vitvm) ("git
+for VM state") checkpoints a whole machine after every command and forks any
+step back to life. Its machines have no GPU and no network. They reach
+gmux hosts through a tunnel to those hosts alone, and a step runs `gmux run`
+like any machine without a GPU. The job's output files come back into the
+machine, and that step's checkpoint keeps them, so a fork has the result
+without running the GPU again.
+
+Three settings make a run of many forks work, and are useful anywhere:
+
+| variable | effect |
+|---|---|
+| `GMUX_SESSION_PREFIX` | mixed into the workspace id, so copies of a directory (a fork and its parent) never share a workspace on the host |
+| `GMUX_OWNER` | who the job is accounted to (default `$USER`) |
+| `GMUX_NAME` | the job's name when `--name` is not given |
+
+vitvm sets them to the sandbox and step, so `gmux usage --by owner` shows what
+each branch of a run cost on the GPU. Tested between an EC2 `c5.metal` and a
+DigitalOcean MI350X: a quarter of the card ran at 415.6 TFLOP/s from inside a
+vitvm machine and 416.7 from its fork, with usage recorded for each.
+Transcript: [docs/evidence/vitvm-integration.txt](docs/evidence/vitvm-integration.txt).
+
 ## Uses
 
 A few things people do with a GPU multiplexer:
