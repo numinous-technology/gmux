@@ -103,7 +103,7 @@ short agent trials across a handful of cards, each trial holding a slice, with
 per-second accounting and a network allowlist per trial. It grew from there
 into a general multiplexer.
 
-## Isolation, honestly
+## Isolation
 
 gmux is for jobs you trust, or mostly trust. Without host access, sharing is
 enforced in user space. On NVIDIA, MPS caps compute and the driver caps
@@ -147,7 +147,7 @@ pip install -e sdk/python             # the Python client
 
 ## Status
 
-Early, and honest about it. Spatial and temporal sharing, admission, resize,
+Early. Spatial and temporal sharing, admission, resize,
 accounting, the network fence and multi-vendor detection all work and are
 tested. The fence is a port of code that ran in production. The memory-cap
 shim's accounting core is tested; its live capping and live compute resize are

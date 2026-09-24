@@ -9,6 +9,9 @@
 // It resolves the real functions with dlsym(RTLD_NEXT), so it needs no CUDA or
 // HIP headers to build. The accounting core (gmux_reserve / gmux_release) is
 // plain C and is unit tested.
+#ifdef GMUX_SHIM_HOOKS
+#define _GNU_SOURCE // must precede every include so RTLD_NEXT is declared
+#endif
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
@@ -50,7 +53,6 @@ uint64_t gmux_limit_from_env(const char *v) {
 //
 // Built into libgmux.so and loaded with LD_PRELOAD. Without GMUX_SHIM_HOOKS
 // (the default for the unit test) only the accounting core above is compiled.
-#define _GNU_SOURCE
 #include <dlfcn.h>
 #include <pthread.h>
 
