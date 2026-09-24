@@ -1,0 +1,80 @@
+gmux remote GPUs, tested for real: this machine (no GPU) as the client, a DigitalOcean
+AMD MI350X droplet as the host, over the internet. 2026-09-24. Tokens redacted.
+Scripts: docs/evidence/remote-client-test.sh, docs/evidence/remote-host-setup.sh.
+
+host setup:
+/opt/tv/lib/python3.12/site-packages/torch/_subclasses/functional_tensor.py:368: UserWarning: Failed to initialize NumPy: No module named 'numpy' (Triggered internally at /__w/pytorch/pytorch/torch/csrc/utils/tensor_numpy.cpp:84.)
+  cpu = _conversion_method_template(device=torch.device("cpu"))
+torch 2.13.0+rocm7.1 AMD Radeon Graphics
+gmux serving 1 card(s) on /var/lib/gmux/s.sock
+  card 0  amd AMD Instinct MI350X VF  287.7G  caps: concurrent, compute cap, memory cap
+gmux serving machines without a GPU on :7070 over TLS
+  on each of them, run:
+    gmux remote add NAME <token>@THIS-HOST:7070#c35b1870606cfe5c7f6be42549810607c8f3052d07ff34e3ced7dfd42d52f96d
+
+##### this machine: ip-172-26-11-45, GPUs: 0 device nodes; host 165.245.162.106
+round trip: 4.278 ms average
+##### setup
+added do: AMD Instinct MI350X VF (8/8 seats free)
+   NAME  HOST                  GPUS
+*  do    165.245.162.106:7070  AMD Instinct MI350X VF (8/8 seats free)
+on do
+CARD  VENDOR  GPU                     MEMORY  ENFORCES
+0     amd     AMD Instinct MI350X VF  287.7G  concurrent, compute cap, memory cap
+PASS  no local gmux: commands go to the GPU host by default
+##### time added per command (empty directory, 1/8 share, run true)
+  ms: 67 72 72 67 62  median 67
+PASS  a remote command adds under 500 ms
+##### sync
+[gmux] do: synced 1 files (1 new)
+-rw-r--r-- 1 root root 268435456 Sep 24 21:02 big.bin
+[gmux] do: synced 1 files (0 new)
+  first run with a new 256 MiB file: 1669 ms; again, unchanged: 70 ms
+PASS  an unchanged directory syncs nothing
+##### benchmark on the remote GPU
+  1/4 share alone: 415.7 286.6
+  four clients, 1/4 share each: 193.1 192.7 193.6 192.8 
+PASS  four remote clients got results
+PASS  the four remote shares split evenly (within 5%)
+##### memory cap on a remote share
+63GiB:ok 78GiB:refused(OutOfMemoryError)
+PASS  a remote 1/4 share is capped (63 GiB ok, 78 GiB refused)
+##### network fence on remote jobs
+[gmux] do: synced 0 files (0 new)
+BLOCKED PermissionError
+PASS  --deny-net blocks a remote job
+[gmux] do: synced 0 files (0 new)
+example.com ALLOWED HTTP/1.1 200 OK
+1.1.1.1 refused SSLEOFError
+PASS  --allow lets the allowlisted host through and refuses the rest
+##### exit codes and Ctrl-C
+PASS  a remote exit code comes back (7)
+j599665342  ctrlc  exited(143)  25%    0      sleep 300
+PASS  Ctrl-C on the client stops the job on the host
+##### placement across hosts
+   NAME   HOST                  GPUS
+*  ghost  10.255.255.1:7070     unreachable: cannot reach gmux host https://10.255.255.1:7070: Get "https://10.255.255.1:7070/v1/cards": context deadline exceeded (Client.Timeout exceeded while awaiting headers)
+   do     165.245.162.106:7070  AMD Instinct MI350X VF (8/8 seats free)
+[gmux] do: synced 0 files (0 new)
+PASS  an unreachable default host is skipped for one that answers
+##### security
+gmux: could not reach wrongfp: cannot reach gmux host https://165.245.162.106:7070: Get "https://165.245.162.106:7070/v1/cards": gmux host certificate fingerprint is c35b1870606cfe5c7f6be42549810607c8f3052d07ff34e3ced7dfd42d52f96d, expected 0000000000000000000000000000000000000000000000000000000000000000
+PASS  a host with a different certificate is refused
+gmux: could not reach wrongtok: a valid bearer token is required
+PASS  a wrong token is refused
+##### the host's view
+ID          NAME   STATE        SHARE  CARDS  COMMAND
+j688873900  -      exited(0)    12%    0      true
+j599665342  ctrlc  exited(143)  25%    0      sleep 300
+j522101994  -      exited(7)    12%    0      sh -c exit 7
+j331628786  -      exited(0)    12%    0      python3 -c import socket, ssl
+for h, sni in [('example.com','example.com'), ('1.1.1.1','one.one.one.one')]:
+    try:
+        s=ssl.create_default_context().wrap_socket(socket.create_connection((h,443),timeout=8), server_hostname=sni)
+JOB         GPU-HOURS  MEM GIB-HOURS  HELD
+q1          0.002      0.5            25s
+q4          0.002      0.5            25s
+q2          0.002      0.5            25s
+q3          0.002      0.5            24s
+alone       0.002      0.5            24s
+##### result: 13 passed, 0 failed

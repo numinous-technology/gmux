@@ -67,24 +67,30 @@ Every stretch of a job holding a share is one interval, appended to a JSON
 lines file. A usage report clips intervals to the window and groups them by
 job, owner, card or vendor. The ledger survives a daemon restart.
 
-## Remote execution
+## Remote GPUs
 
-A GPU-less client can run a command on a gmux host. The design mirrors
+A machine without a GPU runs commands on gmux hosts. The design is
 command-level remoting: the network boundary is the command, not the CUDA call.
 
-- `gmux serve --addr :7070 --token SECRET` opens a TCP listener alongside the
-  local unix socket. The token is required on every remote request; the local
-  socket stays trusted and unauthenticated.
-- A session is a workspace on the host. The client builds a manifest of its
-  working directory (path, sha256, size, exec bit), the host replies with the
-  blobs it does not already have, the client uploads only those, and the host
-  materialises the exact tree (with prune, so it matches the client).
+- `gmux serve --addr :7070` opens a TLS listener next to the local unix socket.
+  On first start it makes a self-signed certificate and a random token and
+  keeps both in the state directory, then prints the target a client needs:
+  `TOKEN@HOST:PORT#FINGERPRINT`. Clients pin the certificate by that
+  fingerprint and send the token on every request; the local socket stays
+  trusted and unauthenticated.
+- Clients keep their hosts in `~/.config/gmux/remotes.json`. With no local
+  daemon, every command goes to them. For a run, the client asks every host
+  for its cards in parallel and picks the one with the most seats left after
+  the job fits, skipping hosts that do not answer; ties go to the default.
+- A session is a workspace on the host. The client lists its working directory
+  (path, sha256, size, exec bit), taking hashes of unchanged files from a local
+  cache keyed by device, inode, size and mtime. The host replies with the
+  blobs it lacks, the client streams only those, and the host writes each to a
+  temp file while hashing it and publishes it only if the hash matches. The
+  host then lays the tree into the workspace, skipping files it wrote before
+  that are unchanged, and removing files the client no longer has.
 - Exec runs the command in that workspace as an ordinary gmux job, so it takes
-  a real share, its compute and memory caps, and its network fence, all applied
-  natively on the host next to the card. Output streams back as NDJSON
-  (`{"type":"o"/"e","d":line}`) and ends with `{"type":"exit","code":n}`.
+  a real share, its caps and its fence, applied on the host next to the card.
+  Output streams back as NDJSON (`{"type":"o"/"e","d":line}`) ending in
+  `{"type":"exit","code":n}`. If the client disconnects, the host stops the job.
 - Fetch returns a gzip tar of workspace files matching a set of globs.
-
-Because blobs are content addressed and shared across sessions, a second run
-from the same directory uploads only what changed. The caps and the fence never
-cross the network; only the command and its files do.

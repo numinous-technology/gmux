@@ -1,43 +1,51 @@
 # gmux
 
-tmux for GPUs. Share one GPU across many jobs, in space and in time, resize
-them while they run, and see exactly who used what.
+One pool of GPUs. gmux splits each card among many jobs, in space and in time,
+and lets machines that have no GPU use those cards as if they were local:
+run a command, get the output, with the job capped to its share of a card on
+whichever host has room.
 
-No root and no host access needed. If you can run Docker, you can run gmux, so
-it works on almost any GPU provider: RunPod, Vast, Lambda, a cloud VM, a
-university node, or your own box.
+No root and no host access needed. If you can run a container with a GPU, you
+can run gmux, so it works on almost any provider: RunPod, Vast, Lambda,
+DigitalOcean, a cloud VM, a university node, or your own box. NVIDIA, AMD and
+Intel; what each can enforce differs, and platform support is documented in
+[Isolation](docs/isolation.md).
 
-Works with NVIDIA, AMD and Intel GPUs. What each one can enforce differs;
-platform support is documented in [Isolation](docs/isolation.md).
+## Quick start
+
+On a machine with a GPU:
+
+```bash
+go build -o /usr/local/bin/gmux ./cmd/gmux
+gmux serve --addr :7070
+# gmux serving machines without a GPU on :7070 over TLS
+#   on each of them, run:
+#     gmux remote add NAME 5c1e...@THIS-HOST:7070#9f2a...
+```
+
+On a laptop, a CPU box, a CI runner, anything without a GPU:
+
+```bash
+gmux remote add gpu1 5c1e...@gpu1.example.com:7070#9f2a...
+gmux run --share 0.25 --mem 20G -- python train.py      # runs on gpu1, output streams back
+gmux run --share 0.5 --pull 'out/*' -- python eval.py   # then fetches its results
+gmux top                                                  # what is on gpu1's cards
+```
+
+On the GPU machine itself the same commands run locally. No GPU handy at all?
+Try it against a pretend card: `gmux serve --fake 1xH100:80G`.
 
 ## Why
 
 Most GPU jobs do not use the whole card. A notebook idles, an eval runs in
 bursts, a small model serves a few requests a minute. Renting a card per job
-wastes most of it. Sharing one by hand means jobs running out of memory,
-fighting over compute, and no record of who used what.
+wastes most of it, and so does renting a GPU machine for every developer, CI
+runner or agent that needs a GPU now and then. Sharing by hand means jobs
+running out of memory, fighting over compute, copying files around, and no
+record of who used what.
 
-gmux splits the card for you and keeps the books.
-
-## Quick start
-
-```bash
-# in a container that has a GPU
-docker run -d --gpus all --name gmux ghcr.io/numinous-technology/gmux serve
-docker exec gmux gmux run --share 0.25 --mem 20G -- python train.py
-docker exec gmux gmux run --share 0.5 -- python serve.py
-docker exec gmux gmux top
-```
-
-No GPU handy? Try the whole thing against a pretend card:
-
-```bash
-gmux serve --fake 1xH100:80G &
-gmux run --share 0.25 --name a -- sleep 20
-gmux run --share 0.25 --name b -- sleep 20
-gmux top
-gmux usage --since 1h --by job
-```
+gmux turns a few GPU machines into a pool: every job gets a capped share of a
+card, from wherever it is started, and the books are kept.
 
 ## What it does
 
@@ -84,30 +92,50 @@ kernel modules, or reconfigures the host. It detects whatever vendor tools are
 present (`nvidia-smi`, `rocm-smi`, `xpu-smi`) and uses them. Tested providers
 and their quirks are in [docs/providers.md](docs/providers.md).
 
-## Run on a remote GPU host
+## Use GPUs from machines without one
 
-A machine with no GPU can run a command on one that has gmux. The daemon syncs
-your working directory (content addressed, so only changed files move), runs
-the command on its GPU under a real share, streams the output back, and hands
-you result files. The network boundary is the command, not the CUDA call, so it
-tolerates latency and needs no driver interception.
+A machine with no GPU runs jobs on GPU hosts it has been told about. There is
+nothing to mount and no driver to install on it.
 
-On the GPU host:
+- **Where a command goes.** `--local`, or `--remote NAME`, or a local daemon if
+  one is running, or else the configured hosts. So on a machine without a GPU,
+  `run`, `ps`, `top`, `cards`, `stop`, `resize` and `usage` all reach the GPU
+  hosts by default. `run` asks every host what it has free and goes to the one
+  with the most room for the job, skipping hosts that do not answer.
+- **What happens on a run.** The working directory is synced to the host
+  (content addressed: unchanged files are neither re-read nor re-sent), the
+  command runs there as an ordinary gmux job with its share, its compute and
+  memory caps and its network fence, the output streams back, and the exit
+  code is yours. `--pull GLOB` fetches result files. Ctrl-C stops the job on
+  the host.
+- **Security.** Hosts serve over TLS with a certificate made once and pinned by
+  its fingerprint in the target, plus a bearer token, both printed by
+  `gmux serve --addr`. A host with a different certificate or a wrong token is
+  refused.
 
-```bash
-gmux serve --addr :7070 --token $SECRET
-```
+`gmux remote ls` shows each host and what is free on it; `gmux remote default
+NAME` picks the one to prefer on a tie.
 
-From any machine, with no GPU of its own:
+Measured from a machine with no GPU to an AMD MI350X host over the internet
+(4 ms round trip):
 
-```bash
-gmux run --remote $SECRET@gpuhost:7070 --share 0.25 \
-    --pull 'out/*' -- python train.py
-```
+| | |
+|---|---|
+| time a remote command adds | 67 ms |
+| first run with a new 256 MiB file in the directory | 1.7 s |
+| the same run again, nothing changed | 70 ms |
+| a 1/4 share, run remotely / run on the host | 415.7 / 416.5 to 419.0 TFLOP/s |
+| four remote clients at once, each | 192.7 to 193.6 TFLOP/s, an even split |
 
-Repeated runs from the same directory reuse the workspace and sync only the
-diff. This is how a fleet of cheap CPU machines shares a pool of GPU hosts:
-the caps and the network fence run natively on the host, next to the card.
+Memory caps, the network fence, exit codes, Ctrl-C, host placement and
+certificate pinning were all checked on that run:
+[docs/evidence/remote-mi350x.txt](docs/evidence/remote-mi350x.txt).
+
+This is command-level remoting: the command and its files go to the GPU, the
+GPU does not come to the machine. A program on the laptop cannot open a remote
+card directly. That is deliberate. The caps and the fence run next to the card,
+where they can be enforced, and a round trip per command, not per CUDA call,
+is what makes it work over an ordinary network.
 
 ## Uses
 
@@ -122,11 +150,13 @@ A few things people do with a GPU multiplexer:
   cap, without handing out root.
 - **Squeeze a fixed rented pod** by fitting more work onto the card you are
   already paying for by the hour.
+- **Give laptops, CI runners and agents GPU access** without a GPU machine
+  each: point them at a couple of shared GPU hosts.
 
 gmux came out of batching GPU evaluations of AI agents: many short agent trials
 across a handful of cards, each trial holding a slice, with per-second
-accounting and a network allowlist per trial, and CPU-only machines dispatching
-work to a GPU pool. It is a general multiplexer now.
+accounting and a network allowlist per trial, dispatched from machines with no
+GPU of their own.
 
 ## Isolation
 
@@ -173,7 +203,9 @@ and binds each job to its share; for AMD and Intel it sets the vendor's device
 and compute-unit variables and, where possible, caps memory with a small
 preload library. The network fence installs a seccomp filter on the job and
 answers its connections from outside the filter, so the job cannot route around
-the allowlist. Usage is a plain append-only ledger. Details in
+the allowlist. Usage is a plain append-only ledger. Machines without a GPU
+reach the daemon over TLS: they sync their working directory, the job runs as
+an ordinary job on the host, and the output streams back. Details in
 [docs/how-it-works.md](docs/how-it-works.md).
 
 ## Build
@@ -188,8 +220,8 @@ pip install -e sdk/python             # the Python client
 ## What works
 
 Spatial and temporal sharing, admission, live resize, per-second accounting,
-the network fence, remote command execution, and multi-vendor detection are
-built and covered by tests on every build.
+the network fence, remote GPUs from machines without one, and multi-vendor
+detection are built and covered by tests on every build.
 
 On real NVIDIA H100, B300 and L40S cards, gmux detects the card, starts MPS, applies each job's
 compute and memory caps, splits the card fairly, and enforces the network
