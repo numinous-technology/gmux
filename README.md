@@ -35,6 +35,32 @@ gmux top                                                  # what is on gpu1's ca
 On the GPU machine itself the same commands run locally. No GPU handy at all?
 Try it against a pretend card: `gmux serve --fake 1xH100:80G`.
 
+## How it fits together
+
+```
+ machines without a GPU                    GPU host: gmux serve --addr :7070
+ (laptops, CI runners, agents)
+                                           +------------------------------------+
+ +----------------------------+   TLS      |  scheduler                         |
+ | gmux run --share 0.25      |  --------> |  seats, admission, queue, preempt  |
+ |   -- python train.py       |  files up  |                                    |
+ +----------------------------+  output    |  card 0                            |
+                                 <-------- |  +--------+--------+-------------+  |
+ +----------------------------+            |  | job A  | job B  | job C       |  |
+ | gmux run --share 0.5 ...   |  --------> |  | 1/4    | 1/4    | 1/2         |  |
+ +----------------------------+            |  +--------+--------+-------------+  |
+                                           |  each job: compute cap, memory cap,|
+ +----------------------------+            |  network fence                     |
+ | gmux top / ps / usage      |  --------> |                                    |
+ +----------------------------+            |  per-second usage ledger           |
+                                           +------------------------------------+
+```
+
+Every job, local or remote, is admitted onto seats of a card. Its compute share
+is enforced by MPS on NVIDIA and by dedicated shader engines on AMD, its memory
+by MPS or a preload library, and its network by a seccomp fence. With several
+GPU hosts configured, each `gmux run` goes to the one with the most room.
+
 ## Why
 
 Most GPU jobs do not use the whole card. A notebook idles, an eval runs in
