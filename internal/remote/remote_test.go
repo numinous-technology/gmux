@@ -207,3 +207,37 @@ func waitState(t *testing.T, c *remote.Client, id, want string) {
 }
 
 var _ = time.Second
+
+func TestUnchangedFilesAreNotReadAgainAndLargeFilesStream(t *testing.T) {
+	t.Setenv("GMUX_HASH_CACHE", filepath.Join(t.TempDir(), "hashes.json"))
+	target := startHost(t)
+	c, _ := remote.Dial(target)
+	work := t.TempDir()
+	big := make([]byte, 24<<20) // larger than any single read buffer
+	for i := range big {
+		big[i] = byte(i * 7)
+	}
+	os.WriteFile(filepath.Join(work, "weights.bin"), big, 0o644)
+	os.WriteFile(filepath.Join(work, "run.sh"), []byte("wc -c weights.bin\n"), 0o755)
+	sid, _ := c.EnsureSession("")
+	if _, up, err := c.Sync(work, sid); err != nil || up != 2 || c.Hashed != 2 {
+		t.Fatalf("first sync: up=%d hashed=%d err=%v", up, c.Hashed, err)
+	}
+	// a new client (a new gmux command) with the same cache reads nothing
+	c2, _ := remote.Dial(target)
+	if _, up, err := c2.Sync(work, sid); err != nil || up != 0 || c2.Hashed != 0 {
+		t.Fatalf("unchanged re-sync: up=%d hashed=%d err=%v, want nothing read or sent", up, c2.Hashed, err)
+	}
+	var out bytes.Buffer
+	if code, err := c2.Exec(context.Background(), sid, remote.ExecRequest{Command: []string{"sh", "run.sh"}, Share: 0.25}, &out, &bytes.Buffer{}); err != nil || code != 0 {
+		t.Fatal(code, err)
+	}
+	if !strings.Contains(out.String(), "25165824") {
+		t.Fatalf("the streamed 24 MiB file arrived as %q", out.String())
+	}
+	// a changed file is read again
+	os.WriteFile(filepath.Join(work, "run.sh"), []byte("echo changed\n"), 0o755)
+	if _, up, _ := c2.Sync(work, sid); up != 1 || c2.Hashed != 1 {
+		t.Fatalf("after one change: up=%d hashed=%d", up, c2.Hashed)
+	}
+}

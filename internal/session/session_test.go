@@ -103,3 +103,18 @@ func tarNames(t *testing.T, tgz []byte) []string {
 	}
 	return names
 }
+
+func TestPutBlobFromStreamsAndVerifies(t *testing.T) {
+	st, _ := Open(t.TempDir())
+	data := []byte(strings.Repeat("model weights ", 100000))
+	n, err := st.PutBlobFrom(sha(data), strings.NewReader(string(data)))
+	if err != nil || n != int64(len(data)) || !st.HasBlob(sha(data)) {
+		t.Fatalf("stream put: n=%d err=%v", n, err)
+	}
+	if _, err := st.PutBlobFrom(sha([]byte("x")), strings.NewReader("y")); err == nil {
+		t.Fatal("a streamed blob that does not match its sha must be refused")
+	}
+	if st.HasBlob(sha([]byte("x"))) {
+		t.Fatal("a refused upload must not become visible")
+	}
+}

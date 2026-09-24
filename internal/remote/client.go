@@ -33,6 +33,10 @@ type Client struct {
 	base  string
 	token string
 	http  *http.Client
+	cache *hashCache
+	// Hashed counts the files the last Sync had to read to hash; the rest came
+	// from the hash cache.
+	Hashed int
 }
 
 // Dial parses a target, TOKEN@HOST:PORT#FINGERPRINT, into a client. With a
@@ -52,7 +56,7 @@ func Dial(target string) (*Client, error) {
 	if target == "" {
 		return nil, fmt.Errorf("no host in remote target")
 	}
-	c := &Client{token: token, http: &http.Client{}}
+	c := &Client{token: token, http: &http.Client{}, cache: openHashCache()}
 	if fp == "" {
 		c.base = "http://" + strings.TrimRight(target, "/")
 		return c, nil
@@ -134,7 +138,9 @@ func (c *Client) EnsureSession(id string) (string, error) {
 // Sync uploads the working directory to the session, sending only blobs the
 // host does not already have.
 func (c *Client) Sync(dir, id string) (files, uploaded int, err error) {
-	manifest, err := buildManifest(dir)
+	manifest, hashed, err := buildManifest(dir, c.cache)
+	c.Hashed = hashed
+	c.cache.save()
 	if err != nil {
 		return 0, 0, err
 	}
@@ -149,12 +155,15 @@ func (c *Client) Sync(dir, id string) (files, uploaded int, err error) {
 		bySHA[f.SHA] = filepath.Join(dir, filepath.FromSlash(f.Path))
 	}
 	for _, sha := range miss.Missing {
-		data, err := os.ReadFile(bySHA[sha])
+		f, err := os.Open(bySHA[sha]) // streamed, so a large file is never held in memory
 		if err != nil {
 			return 0, 0, err
 		}
-		req, _ := c.req("PUT", "/v1/blobs/"+sha, bytes.NewReader(data), "application/octet-stream")
+		fi, _ := f.Stat()
+		req, _ := c.req("PUT", "/v1/blobs/"+sha, f, "application/octet-stream")
+		req.ContentLength = fi.Size()
 		resp, err := c.http.Do(req)
+		f.Close()
 		if err != nil {
 			return 0, 0, err
 		}
@@ -270,8 +279,11 @@ func (c *Client) Delete(id string) error {
 	return c.doJSON("DELETE", "/v1/sessions/"+id, nil, nil)
 }
 
-func buildManifest(root string) ([]session.File, error) {
+// buildManifest lists the regular files under root with their hashes, taking
+// unchanged files' hashes from the cache. It returns how many it had to read.
+func buildManifest(root string, cache *hashCache) ([]session.File, int, error) {
 	var out []session.File
+	hashed := 0
 	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -286,18 +298,20 @@ func buildManifest(root string) ([]session.File, error) {
 		if err != nil || !info.Mode().IsRegular() {
 			return nil
 		}
-		data, err := os.ReadFile(p)
+		abs, _ := filepath.Abs(p)
+		sum, read, err := cache.hashFile(abs, info)
 		if err != nil {
 			return err
 		}
-		sum := sha256.Sum256(data)
+		if read {
+			hashed++
+		}
 		rel, _ := filepath.Rel(root, p)
-		out = append(out, session.File{Path: filepath.ToSlash(rel), SHA: hex.EncodeToString(sum[:]),
-			Size: info.Size(), X: info.Mode()&0o100 != 0})
+		out = append(out, session.File{Path: filepath.ToSlash(rel), SHA: sum, Size: info.Size(), X: info.Mode()&0o100 != 0})
 		return nil
 	})
 	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
-	return out, err
+	return out, hashed, err
 }
 
 func firstNonEmpty(a, b string) string {

@@ -100,16 +100,12 @@ func (s *Server) blob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sha := strings.TrimPrefix(r.URL.Path, "/v1/blobs/")
-	data, err := io.ReadAll(io.LimitReader(r.Body, 8<<30))
+	n, err := s.sessions.PutBlobFrom(sha, r.Body)
 	if err != nil {
 		fail(w, 400, err.Error())
 		return
 	}
-	if err := s.sessions.PutBlob(sha, data); err != nil {
-		fail(w, 400, err.Error())
-		return
-	}
-	writeJSON(w, 200, map[string]any{"sha": sha, "size": len(data)})
+	writeJSON(w, 200, map[string]any{"sha": sha, "size": n})
 }
 
 func (s *Server) apply(w http.ResponseWriter, r *http.Request, id string) {

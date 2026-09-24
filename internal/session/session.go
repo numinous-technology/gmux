@@ -12,6 +12,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -114,6 +115,33 @@ func (s *Store) PutBlob(sha string, data []byte) error {
 		return err
 	}
 	return os.Rename(tmp, dst)
+}
+
+// PutBlobFrom streams a blob into the store, verifying it hashes to sha before
+// it becomes visible. A large upload is never held in memory.
+func (s *Store) PutBlobFrom(sha string, r io.Reader) (int64, error) {
+	if !validSHA(sha) {
+		return 0, fmt.Errorf("bad sha")
+	}
+	dst := s.blobPath(sha)
+	f, err := os.CreateTemp(filepath.Dir(dst), ".upload-*")
+	if err != nil {
+		return 0, err
+	}
+	h := sha256.New()
+	n, err := io.Copy(io.MultiWriter(f, h), r)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		os.Remove(f.Name())
+		return n, err
+	}
+	if hex.EncodeToString(h.Sum(nil)) != sha {
+		os.Remove(f.Name())
+		return n, fmt.Errorf("blob does not match its sha")
+	}
+	return n, os.Rename(f.Name(), dst)
 }
 
 // Apply materialises the manifest into the session workspace. With prune it
