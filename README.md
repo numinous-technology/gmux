@@ -1,15 +1,18 @@
 # gmux
 
-One pool of GPUs. gmux splits each card among many jobs, in space and in time,
-and lets machines that have no GPU use those cards as if they were local:
-run a command, get the output, with the job capped to its share of a card on
-whichever host has room.
+tmux for GPUs. Share one GPU across many jobs, in space and in time, resize
+them while they run, and see exactly who used what.
 
-No root and no host access needed. If you can run a container with a GPU, you
-can run gmux, so it works on almost any provider: RunPod, Vast, Lambda,
-DigitalOcean, a cloud VM, a university node, or your own box. NVIDIA, AMD and
-Intel; what each can enforce differs, and platform support is documented in
-[Isolation](docs/isolation.md).
+Use them from anywhere. Point a laptop, a CI runner or an agent at a gmux host,
+and `gmux run` runs there, on a share of a card, with the output streaming
+back. The machine you type on needs no GPU.
+
+No root and no host access needed. If you can run Docker, you can run gmux, so
+it works on almost any GPU provider: RunPod, Vast, Lambda, DigitalOcean, a
+cloud VM, a university node, or your own box.
+
+Works with NVIDIA, AMD and Intel GPUs. What each one can enforce differs;
+platform support is documented in [Isolation](docs/isolation.md).
 
 ## Quick start
 
