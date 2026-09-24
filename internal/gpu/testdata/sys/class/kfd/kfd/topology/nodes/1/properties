@@ -1,0 +1,9 @@
+cpu_cores_count 0
+simd_count 1216
+array_count 32
+simd_arrays_per_engine 1
+cu_per_simd_array 10
+simd_per_cu 4
+gfx_target_version 90402
+unique_id 13407475429768182521
+num_xcc 8

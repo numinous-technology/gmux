@@ -33,6 +33,11 @@ type Device struct {
 	Vendor string `json:"vendor"`
 	MemMiB int    `json:"mem_mib"`
 	Units  int    `json:"compute_units,omitempty"` // SMs, CUs or Xe cores, when known
+	// Chiplets and Engines describe how compute units are grouped, when the
+	// vendor publishes it (AMD: XCDs and shader engines per XCD). Backends that
+	// partition by compute unit use it to give every job a balanced shape.
+	Chiplets int `json:"chiplets,omitempty"`
+	Engines  int `json:"engines_per_chiplet,omitempty"`
 }
 
 // Caps is what a backend can enforce on a shared card without host access.
@@ -49,6 +54,7 @@ type Slot struct {
 	SeatsPerCard   int
 	MemMiB         int
 	ComputePercent int
+	SeatIDs        []int // the specific seats held; backends that partition hardware use them
 }
 
 // Backend is one vendor.

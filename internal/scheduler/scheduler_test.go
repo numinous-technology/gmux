@@ -173,3 +173,59 @@ func TestRequeuedJobResumesFirst(t *testing.T) {
 		t.Fatalf("the preempted job resumes before a job that merely waited: %+v", started)
 	}
 }
+
+func TestJobsOnOneCardHoldDisjointSeats(t *testing.T) {
+	s := New(h100s(1))
+	owner := map[int]string{}
+	for _, id := range []string{"a", "b", "c", "d"} {
+		sl := admit(t, s, Request{ID: id, Share: 0.25}).Placement.Slots[0]
+		if len(sl.SeatIDs) != 2 {
+			t.Fatalf("%s holds seats %v, want 2", id, sl.SeatIDs)
+		}
+		if sl.SeatIDs[1] != sl.SeatIDs[0]+1 {
+			t.Fatalf("%s seats %v should be contiguous on an empty card", id, sl.SeatIDs)
+		}
+		for _, i := range sl.SeatIDs {
+			if other, taken := owner[i]; taken {
+				t.Fatalf("seat %d given to %s and %s", i, other, id)
+			}
+			owner[i] = id
+		}
+	}
+	// b leaves; the next quarter job takes exactly b's seats
+	var bSeats []int
+	for i, id := range owner {
+		if id == "b" {
+			bSeats = append(bSeats, i)
+		}
+	}
+	s.Release("b")
+	e := admit(t, s, Request{ID: "e", Share: 0.25}).Placement.Slots[0]
+	for _, i := range e.SeatIDs {
+		if owner[i] != "b" {
+			t.Fatalf("e took seat %d owned by %s; free seats were %v", i, owner[i], bSeats)
+		}
+	}
+}
+
+func TestResizeKeepsItsSeats(t *testing.T) {
+	s := New(h100s(1))
+	a := admit(t, s, Request{ID: "a", Share: 0.25}).Placement.Slots[0]
+	p, err := s.Resize("a", 0.5, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	grown := p.Slots[0].SeatIDs
+	if len(grown) != 4 {
+		t.Fatalf("grown to %v, want 4 seats", grown)
+	}
+	for _, i := range a.SeatIDs {
+		found := false
+		for _, j := range grown {
+			found = found || i == j
+		}
+		if !found {
+			t.Fatalf("resize moved the job off seat %d: %v -> %v", i, a.SeatIDs, grown)
+		}
+	}
+}

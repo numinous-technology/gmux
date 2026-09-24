@@ -205,7 +205,7 @@ func (d *Daemon) startLocked(job *Job, pl *scheduler.Placement) error {
 	for _, slot := range pl.Slots {
 		ref := d.byCard[slot.Card]
 		b := d.backends[ref.vendor]
-		for k, v := range b.JobEnv(ref.dev, gpu.Slot{Seats: slot.Seats, SeatsPerCard: d.seats, MemMiB: slot.MemMiB, ComputePercent: slot.ComputePercent}, d.stateDir) {
+		for k, v := range b.JobEnv(ref.dev, gpu.Slot{Seats: slot.Seats, SeatsPerCard: d.seats, MemMiB: slot.MemMiB, ComputePercent: slot.ComputePercent, SeatIDs: slot.SeatIDs}, d.stateDir) {
 			env[k] = v
 		}
 		ivs = append(ivs, accounting.Interval{Job: job.ID, Name: job.Name, Owner: job.Owner,

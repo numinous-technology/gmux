@@ -140,9 +140,10 @@ separate cards. The full picture is in [docs/isolation.md](docs/isolation.md).
 
 ## Benchmark
 
-Measured on one NVIDIA L40S (46 GB) through gmux. Each job runs a sustained
-fp16 8192-square matmul for 20 seconds, long enough that concurrent jobs
-genuinely overlap. Reproduce with `bench/run.sh`.
+Each job runs a sustained fp16 8192-square matmul, long enough that
+concurrent jobs genuinely overlap. Reproduce with `bench/run.sh`.
+
+NVIDIA L40S (46 GB), MPS caps:
 
 | Setup | TFLOP/s per job | GPU memory the job can see |
 |---|---|---|
@@ -150,15 +151,24 @@ genuinely overlap. Reproduce with `bench/run.sh`.
 | One 1/4 share, alone on an idle card | 81.1 | 10.6 GiB |
 | Four 1/4 shares at once | 32.7, 32.7, 32.7, 32.7 | 10.6 GiB each |
 
-The memory cap is hard: every quarter share sees 10.6 GiB and cannot allocate
-past it. The split is fair: four concurrent shares got identical throughput.
-The compute cap holds: a quarter share alone cannot take the whole card.
+AMD MI325X (256 GB), compute-unit partitions and the memory shim:
+
+| Setup | TFLOP/s per job | Memory limit |
+|---|---|---|
+| One job, whole card, no gmux | 741.9 | 256 GB |
+| Each 1/4 share alone | 256.6, 256.9, 256.8, 257.4 | 64 GB, enforced |
+| Four 1/4 shares at once | 119.8, 119.5, 119.8, 119.4 | 64 GB each |
+
+Memory caps are hard on both: a quarter share on the MI325X can allocate 60 GB
+and is refused at 70 GB. Shares are fair: concurrent jobs get the same
+throughput. Compute caps hold: a quarter alone cannot take the whole card.
 
 Sharing pays when jobs do not fill the card on their own: notebooks, bursty
 evals, small models serving a few requests. A single job that already
 saturates the card, like this matmul, runs fastest alone; four saturating
-shares add up to less than one dedicated job. The full transcript is in
-[docs/evidence/l40s-real-gpu.txt](docs/evidence/l40s-real-gpu.txt).
+shares add up to less than one dedicated job. Transcripts:
+[L40S](docs/evidence/l40s-real-gpu.txt),
+[MI325X](docs/evidence/mi325x-real-gpu.txt).
 
 ## How it works
 
@@ -187,15 +197,18 @@ the network fence, remote command execution, and multi-vendor detection are
 built and covered by tests on every build.
 
 On a real NVIDIA L40S, gmux detects the card, starts MPS, applies each job's
-compute and memory caps, splits the card fairly (the benchmark above), and
-enforces the network fence: `--deny-net` blocks everything, and `--allow`
-resolves and connects to allowlisted hosts while refusing the rest. See
-[docs/evidence/l40s-real-gpu.txt](docs/evidence/l40s-real-gpu.txt).
+compute and memory caps, splits the card fairly, and enforces the network
+fence: `--deny-net` blocks everything, and `--allow` resolves and connects to
+allowlisted hosts while refusing the rest.
 
-The AMD and Intel backends drive `rocm-smi` and CU masks, and `xpu-smi`. Their
-parsers are tested against recorded output from MI300X, MI250X, RX 7900 XTX,
-Max 1550, Flex 170 and Arc A770, alongside H100, A100, L4, RTX 4090 and T4 on
-the NVIDIA side. `gmux cards` reports what each card can enforce.
+On a real AMD MI325X, gmux selects the card by UUID, gives each job its own
+shader engines on every chiplet (checked with a compute-unit probe, see
+`bench/cuprobe.hip`), and caps HIP allocations through the preload shim, with
+PyTorch.
+
+The Intel backend drives `xpu-smi`; its parser is tested against recorded
+output from Max 1550, Flex 170 and Arc A770. `gmux cards` reports what each
+card can enforce.
 
 Preempt-and-resume through `cuda-checkpoint` is the next backend feature.
 

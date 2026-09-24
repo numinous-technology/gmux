@@ -9,7 +9,7 @@ can decide whether gmux fits your trust model.
 | | NVIDIA | AMD | Intel |
 |---|---|---|---|
 | Jobs run at the same time | yes (MPS) | yes | yes |
-| Compute share capped | yes (MPS thread %) | yes (CU mask, when known) | no |
+| Compute share capped | yes (MPS thread %) | yes (whole shader engines per job) | no |
 | Memory capped | yes (MPS pinned limit) | yes (preload shim) | no |
 | Suspended job frees its memory | with cuda-checkpoint | no | no |
 | Admission (refuse what will not fit) | yes | yes | yes |
@@ -19,6 +19,19 @@ Where a cap is not available, the share is still enforced by admission: gmux
 will not place more work on a card than it has seats and memory for. What it
 cannot do in that case is stop a job that ignores its share from using more
 than its slice at runtime.
+
+## How AMD compute partitions work
+
+gmux gives each AMD job its own compute units through `HSA_CU_MASK`. The
+runtime deals mask bits round robin across chiplets and then across each
+chiplet's shader engines, and the hardware splits a kernel's work evenly across
+every engine a job touches, so a job runs at the speed of its thinnest engine.
+gmux therefore hands out whole engines: on an 8-chiplet MI300-class card, a
+quarter share owns one shader engine on every chiplet, and an eighth owns half
+of one. It reads the chiplet and engine counts from the kernel's KFD topology
+(no root). Units that exist on only some engines are left out, so no job ever
+has a lone unit on an engine; on an MI325X that is 16 of 304 units when the card
+is fully partitioned.
 
 ## What gmux does not do
 

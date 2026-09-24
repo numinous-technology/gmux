@@ -8,6 +8,7 @@ libgmux.so: gmux_shim.c
 
 test: shim_test
 	./shim_test
+	sh test/run.sh
 
 shim_test: gmux_shim.c shim_test.c
 	$(CC) $(CFLAGS) -o $@ gmux_shim.c shim_test.c

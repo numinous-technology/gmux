@@ -3,6 +3,7 @@ package gpu
 import (
 	"context"
 	"fmt"
+	"math/big"
 	"os"
 	"strings"
 	"testing"
@@ -148,15 +149,22 @@ func TestAMDJobEnvMasksComputeUnitsAndCapsMemory(t *testing.T) {
 	b := NewAMD(&recorded{})
 	b.Shim = "/opt/gmux/libgmux.so"
 	env := b.JobEnv(Device{Index: 1, Units: 110}, Slot{Seats: 2, SeatsPerCard: 8, MemMiB: 16380, ComputePercent: 25}, "")
-	if env["HIP_VISIBLE_DEVICES"] != "1" || env["ROCR_VISIBLE_DEVICES"] != "1" {
+	// card 1 is selected once, by the runtime filter; HIP then sees it as 0.
+	// Filtering by HIP_VISIBLE_DEVICES=1 as well would hide it.
+	if env["ROCR_VISIBLE_DEVICES"] != "1" || env["HIP_VISIBLE_DEVICES"] != "0" {
 		t.Fatalf("device selection: %v", env)
 	}
 	if env["GMUX_MEM_LIMIT_MIB"] != "16380" || env["LD_PRELOAD"] != "/opt/gmux/libgmux.so" {
 		t.Fatalf("memory cap: %v", env)
 	}
-	// 25% of 110 CUs rounds up to 28: the lowest 28 bits set
+	// no seat ids: 25% of 110 CUs rounds up to 28, the lowest 28 bits set
 	if env["HSA_CU_MASK"] != "0:0xfffffff" {
 		t.Fatalf("cu mask = %q", env["HSA_CU_MASK"])
+	}
+	// with a UUID the card is selected by it, which is stable across machines
+	byID := b.JobEnv(Device{Index: 1, UUID: "0xBA10EBDE161C3AF9", Units: 110}, Slot{Seats: 8, SeatsPerCard: 8, ComputePercent: 100}, "")
+	if byID["ROCR_VISIBLE_DEVICES"] != "GPU-ba10ebde161c3af9" {
+		t.Fatalf("uuid selection: %v", byID)
 	}
 	if !b.Caps().MemoryCap {
 		t.Fatal("shim present, memory is capped")
@@ -167,14 +175,101 @@ func TestAMDJobEnvMasksComputeUnitsAndCapsMemory(t *testing.T) {
 	}
 }
 
-func TestCUMask(t *testing.T) {
-	for _, c := range []struct {
-		n, total int
-		want     string
-	}{{1, 8, "0x1"}, {4, 8, "0xf"}, {5, 8, "0x1f"}, {8, 8, ""}, {76, 304, "0x" + strings.Repeat("f", 19)}} {
-		if got := cuMask(c.n, c.total); got != c.want {
-			t.Fatalf("cuMask(%d,%d) = %q want %q", c.n, c.total, got, c.want)
+// maskBits decodes an HSA_CU_MASK hex string into the set bits.
+func maskBits(t *testing.T, mask string) []int {
+	t.Helper()
+	m, ok := new(big.Int).SetString(strings.TrimPrefix(mask, "0x"), 16)
+	if !ok {
+		t.Fatalf("bad mask %q", mask)
+	}
+	var out []int
+	for i := 0; i < m.BitLen(); i++ {
+		if m.Bit(i) == 1 {
+			out = append(out, i)
 		}
+	}
+	return out
+}
+
+// place is where ROCm puts a mask bit: chiplet b mod X, then round robin over
+// that chiplet's engines (measured on an MI325X with a CU-id probe).
+func place(b, X, E int) (chiplet, engine int) { return b % X, (b / X) % E }
+
+func TestSeatMasksGiveEachJobWholeEnginesOnEveryChiplet(t *testing.T) {
+	mi325 := Device{Units: 304, Chiplets: 8, Engines: 4}
+	seen := map[int]bool{}
+	for q := 0; q < 4; q++ {
+		bits := maskBits(t, seatCUMask([]int{2 * q, 2*q + 1}, 8, mi325, 76))
+		perChipletEngine := map[[2]int]int{}
+		for _, b := range bits {
+			if seen[b] {
+				t.Fatalf("bit %d given to two quarters", b)
+			}
+			seen[b] = true
+			c, e := place(b, 8, 4)
+			perChipletEngine[[2]int{c, e}]++
+		}
+		if len(perChipletEngine) != 8 {
+			t.Fatalf("quarter %d touches %d chiplet-engines, want engine %d on all 8 chiplets: %v", q, len(perChipletEngine), q, perChipletEngine)
+		}
+		for ce, n := range perChipletEngine {
+			if ce[1] != q || n != 9 {
+				t.Fatalf("quarter %d has %d units on chiplet %d engine %d, want 9 on engine %d only", q, n, ce[0], ce[1], q)
+			}
+		}
+	}
+	// eighths split an engine evenly and stay disjoint
+	seen = map[int]bool{}
+	for s := 0; s < 8; s++ {
+		bits := maskBits(t, seatCUMask([]int{s}, 8, mi325, 38))
+		if len(bits) != 32 {
+			t.Fatalf("eighth %d owns %d units, want 32 (4 rounds x 8 chiplets)", s, len(bits))
+		}
+		for _, b := range bits {
+			if seen[b] {
+				t.Fatalf("bit %d given to two eighths", b)
+			}
+			seen[b] = true
+			if _, e := place(b, 8, 4); e != s/2 {
+				t.Fatalf("eighth %d strayed onto engine %d", s, e)
+			}
+		}
+	}
+	if seatCUMask([]int{0, 1, 2, 3, 4, 5, 6, 7}, 8, mi325, 304) != "" {
+		t.Fatal("a job holding every seat needs no mask")
+	}
+}
+
+func TestSeatMasksFallBackWithoutTopology(t *testing.T) {
+	plain := Device{Units: 304}
+	seen := map[int]bool{}
+	for q := 0; q < 4; q++ {
+		bits := maskBits(t, seatCUMask([]int{2 * q, 2*q + 1}, 8, plain, 76))
+		if len(bits) != 76 {
+			t.Fatalf("quarter %d owns %d units, want 76", q, len(bits))
+		}
+		for _, b := range bits {
+			if seen[b] {
+				t.Fatalf("bit %d given twice", b)
+			}
+			seen[b] = true
+		}
+	}
+	if got := seatCUMask(nil, 8, plain, 76); got != "0x"+strings.Repeat("f", 19) {
+		t.Fatalf("no seats = %q", got)
+	}
+}
+
+func TestAMDReadsChipletsAndEnginesFromKFD(t *testing.T) {
+	b := NewAMD(&recorded{})
+	b.SysRoot = "testdata/sys"
+	devs := []Device{{Index: 0, UUID: "0xba10ebde161c3af9", Units: 304}, {Index: 1, UUID: "0x1"}}
+	b.readTopology(devs)
+	if devs[0].Chiplets != 8 || devs[0].Engines != 4 {
+		t.Fatalf("MI325X topology = %d chiplets x %d engines, want 8 x 4", devs[0].Chiplets, devs[0].Engines)
+	}
+	if devs[1].Chiplets != 0 {
+		t.Fatal("an unmatched card must keep no topology")
 	}
 }
 

@@ -1,0 +1,39 @@
+gmux on a real AMD Instinct MI325X (256 GB, gfx942, 304 CUs = 8 XCDs x 4 shader
+engines), DigitalOcean GPU droplet, ROCm, PyTorch 2.5.1+rocm6.2, not sandboxed.
+2026-09-24.
+
+== detection ==
+CARD  VENDOR  GPU                  MEMORY  ENFORCES
+0     amd     AMD Radeon Graphics  255.7G  concurrent, compute cap, memory cap
+card selected by UUID: ROCR_VISIBLE_DEVICES=GPU-ba10ebde161c3af9, HIP_VISIBLE_DEVICES=0
+topology from /sys/class/kfd: num_xcc 8, array_count 32 -> 8 chiplets x 4 engines
+
+== benchmark: sustained fp16 8192^2 matmul (TFLOP/s) ==
+one job, whole card (no gmux)            741.9
+each 1/4 share alone (seats 0-1..6-7)     256.6  256.9  256.8  257.4
+four 1/4 shares at once                   119.8  119.5  119.8  119.4
+
+== memory cap (0.25 share, 64 GiB limit, via libgmux.so) ==
+under gmux:    60 GiB ok, 70 GiB refused (torch OutOfMemoryError)
+without gmux:  60 GiB ok, 70 GiB ok
+
+== where each job actually runs (CU-id probe: HW_ID + XCC_ID per workgroup) ==
+chiplet x engine unit counts, 8 chiplets:
+quarter 1: [9,0,0,0] on every chiplet
+quarter 2: [0,9,0,0] on every chiplet
+quarter 3: [0,0,9,0] on every chiplet
+quarter 4: [0,0,0,9] on every chiplet
+eighth:    [4,0,0,0] on every chiplet (32 units)
+
+== why the masks look like this ==
+Whole card: [10,9,10,9] [9,10,10,9] ... (38 per chiplet, min 9 per engine).
+ROCm deals mask bits round robin: bit i -> chiplet i mod 8, then round robin
+over that chiplet's engines. The hardware splits a kernel evenly across every
+engine a job has units on, so a job runs at the speed of its thinnest engine.
+
+Earlier masks, measured on the same card:
+contiguous quarters (bits 0-75, 76-151, ...):
+  alone 220.1 221.8 221.1 124.8; four at once 109.7 105.0 109.7 56.8
+  (quarter 4 left one engine with a single unit on two chiplets)
+bit-striped quarters (bit u%4==k): ignored by the runtime; every job ran on
+  all 304 units, so it was timesharing, not partitioning.

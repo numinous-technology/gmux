@@ -56,6 +56,10 @@ type Slot struct {
 	GrantedShare   float64 `json:"granted_share"`
 	MemMiB         int     `json:"mem_mib"`
 	ComputePercent int     `json:"compute_percent"`
+	// SeatIDs are the specific seats this slot holds on the card, so backends
+	// that partition hardware (AMD compute units) give each job its own part
+	// of the card instead of every job the same part.
+	SeatIDs []int `json:"seat_ids"`
 }
 
 // Placement is where a job runs.
@@ -159,13 +163,82 @@ func need(r Request, c *Card) (seats, mem int, err error) {
 	return seats, mem, nil
 }
 
-func (s *Scheduler) slot(r Request, c *Card, seats, mem int) Slot {
+func (s *Scheduler) slot(r Request, c *Card, seats, mem int, ignore map[string]bool, keep []int) Slot {
 	pct := share.ComputePercent(seats, c.Seats)
 	if r.Burst {
 		pct = 100
 	}
-	return Slot{Card: c.Index, Seats: seats, GrantedShare: share.Granted(seats, c.Seats), MemMiB: mem, ComputePercent: pct}
+	return Slot{Card: c.Index, Seats: seats, GrantedShare: share.Granted(seats, c.Seats), MemMiB: mem,
+		ComputePercent: pct, SeatIDs: s.pickSeats(c, seats, ignore, keep)}
 }
+
+// occupied marks the seats in use on a card, ignoring some jobs.
+func (s *Scheduler) occupied(c *Card, ignore map[string]bool) []bool {
+	used := make([]bool, c.Seats)
+	for id, p := range s.running {
+		if ignore[id] {
+			continue
+		}
+		for _, sl := range p.slots {
+			if sl.Card != c.Index {
+				continue
+			}
+			for _, i := range sl.SeatIDs {
+				if i >= 0 && i < len(used) {
+					used[i] = true
+				}
+			}
+		}
+	}
+	return used
+}
+
+// pickSeats chooses n free seats on a card. Seats in keep that are still free
+// come first (a resize keeps its place); then the first contiguous run long
+// enough; then the lowest free seats. Callers have already checked n fit.
+func (s *Scheduler) pickSeats(c *Card, n int, ignore map[string]bool, keep []int) []int {
+	used := s.occupied(c, ignore)
+	var out []int
+	for _, i := range keep {
+		if len(out) == n {
+			break
+		}
+		if i >= 0 && i < len(used) && !used[i] {
+			out = append(out, i)
+			used[i] = true
+		}
+	}
+	need := n - len(out)
+	if need == 0 {
+		return sortedInts(out)
+	}
+	if len(out) == 0 {
+		for start := 0; start+need <= len(used); start++ {
+			run := true
+			for i := start; i < start+need; i++ {
+				if used[i] {
+					run = false
+					break
+				}
+			}
+			if run {
+				for i := start; i < start+need; i++ {
+					out = append(out, i)
+				}
+				return out
+			}
+		}
+	}
+	for i := 0; i < len(used) && len(out) < n; i++ {
+		if !used[i] {
+			out = append(out, i)
+			used[i] = true
+		}
+	}
+	return sortedInts(out)
+}
+
+func sortedInts(v []int) []int { sort.Ints(v); return v }
 
 // fit finds cards for r, ignoring the given jobs as if they were gone.
 func (s *Scheduler) fit(r Request, ignore map[string]bool) ([]Slot, error) {
@@ -211,7 +284,7 @@ func (s *Scheduler) fit(r Request, ignore map[string]bool) ([]Slot, error) {
 	})
 	out := make([]Slot, 0, want)
 	for _, cd := range cands[:want] {
-		out = append(out, s.slot(r, cd.c, cd.seats, cd.mem))
+		out = append(out, s.slot(r, cd.c, cd.seats, cd.mem, ignore, nil))
 	}
 	return out, nil
 }
@@ -393,7 +466,7 @@ func (s *Scheduler) Resize(id string, fraction float64, memMiB int) (*Placement,
 			return nil, fmt.Errorf("card %d has %d free seats and %s free memory", c.Index,
 				c.Seats-usedS, share.FormatMem(c.MemMiB-usedM))
 		}
-		slots = append(slots, s.slot(r, c, seats, mem))
+		slots = append(slots, s.slot(r, c, seats, mem, ignore, old.SeatIDs))
 	}
 	p.req, p.slots = r, slots
 	return &Placement{JobID: id, Slots: slots}, nil
