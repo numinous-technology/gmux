@@ -241,3 +241,24 @@ func TestUnchangedFilesAreNotReadAgainAndLargeFilesStream(t *testing.T) {
 		t.Fatalf("after one change: up=%d hashed=%d", up, c2.Hashed)
 	}
 }
+
+func TestRemoteJobsCarryTheirOwner(t *testing.T) {
+	c, _ := remote.Dial(startHost(t))
+	sid, _ := c.EnsureSession("")
+	c.Sync(t.TempDir(), sid)
+	c.Exec(context.Background(), sid, remote.ExecRequest{Command: []string{"true"}, Share: 0.25, Name: "step1", Owner: "vit-sbx-1"}, &bytes.Buffer{}, &bytes.Buffer{})
+	u, err := c.Usage("1h", "owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, _ := u["rows"].([]any)
+	found := false
+	for _, r := range rows {
+		if m, _ := r.(map[string]any); m["key"] == "vit-sbx-1" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("usage by owner should list vit-sbx-1: %v", rows)
+	}
+}

@@ -58,3 +58,37 @@ func TestHostConfigRoundTrip(t *testing.T) {
 		t.Fatal("hostOf")
 	}
 }
+
+func TestSessionPrefixSeparatesForks(t *testing.T) {
+	t.Setenv("GMUX_SESSION_PREFIX", "")
+	plain := sessionFor("/work")
+	t.Setenv("GMUX_SESSION_PREFIX", "sbx-parent")
+	parent := sessionFor("/work")
+	t.Setenv("GMUX_SESSION_PREFIX", "sbx-fork")
+	fork := sessionFor("/work")
+	if parent == fork || parent == plain {
+		t.Fatal("a sandbox and its fork, with the same path, must get different sessions")
+	}
+	if sessionFor("/work") != fork {
+		t.Fatal("a session must be stable for the same prefix and path")
+	}
+}
+
+func TestOwnerAndNameFromTheEnvironment(t *testing.T) {
+	t.Setenv("USER", "alice")
+	t.Setenv("GMUX_OWNER", "")
+	if jobOwner() != "alice" {
+		t.Fatal("owner defaults to the user")
+	}
+	t.Setenv("GMUX_OWNER", "vit-sbx-1")
+	if jobOwner() != "vit-sbx-1" {
+		t.Fatal("GMUX_OWNER sets the owner")
+	}
+	t.Setenv("GMUX_NAME", "vit-sbx-1-step3")
+	if jobName(flags(nil)) != "vit-sbx-1-step3" {
+		t.Fatal("GMUX_NAME names the job")
+	}
+	if jobName(flags([]string{"--name", "explicit"})) != "explicit" {
+		t.Fatal("--name wins over GMUX_NAME")
+	}
+}

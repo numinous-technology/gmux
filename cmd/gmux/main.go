@@ -216,7 +216,7 @@ func run(args []string) error {
 	}
 	req := daemon.SubmitRequest{
 		Command: cmd, Share: shareF, MemMiB: mem, GPUs: fs.intv("gpus", 0),
-		Name: fs.str("name", ""), Owner: os.Getenv("USER"), Priority: fs.intv("priority", 0),
+		Name: jobName(fs), Owner: jobOwner(), Priority: fs.intv("priority", 0),
 		Preemptible: fs.bool("preemptible"), Burst: fs.bool("burst"), Wait: fs.bool("wait"),
 		Allow: fs.multiVals("allow"), DenyNet: fs.bool("deny-net"),
 	}
@@ -264,7 +264,7 @@ func runRemote(name, target string, fs *flagset, cmd []string, shareF float64, m
 	}
 	fmt.Fprintf(os.Stderr, "[gmux] %s: synced %d files (%d new)\n", name, nf, up)
 	exit, err := c.Exec(ctx, sid, remote.ExecRequest{
-		Command: cmd, Share: shareF, MemMiB: mem, Name: fs.str("name", ""),
+		Command: cmd, Share: shareF, MemMiB: mem, Name: jobName(fs), Owner: jobOwner(),
 		Allow: fs.multiVals("allow"), DenyNet: fs.bool("deny-net"), Wait: fs.bool("wait"),
 	}, os.Stdout, os.Stderr)
 	if ctx.Err() != nil {
@@ -289,9 +289,30 @@ func runRemote(name, target string, fs *flagset, cmd []string, shareF float64, m
 
 // sessionFor derives a stable session id from a directory, so repeated runs
 // from the same folder reuse the same remote workspace and only sync changes.
+// GMUX_SESSION_PREFIX namespaces it: vitvm sets it to the sandbox id, so a
+// sandbox and its forks, which share paths, never share a workspace.
 func sessionFor(dir string) string {
-	sum := sha256.Sum256([]byte(dir))
+	key := dir
+	if p := os.Getenv("GMUX_SESSION_PREFIX"); p != "" {
+		key = p + ":" + dir
+	}
+	sum := sha256.Sum256([]byte(key))
 	return "ws" + hex.EncodeToString(sum[:])[:12]
+}
+
+// jobOwner is who a job is accounted to: GMUX_OWNER if set (vitvm sets the
+// sandbox), else the user.
+func jobOwner() string {
+	if o := os.Getenv("GMUX_OWNER"); o != "" {
+		return o
+	}
+	return os.Getenv("USER")
+}
+
+// jobName is the job's label: --name, else GMUX_NAME (vitvm sets the sandbox
+// and step), else none.
+func jobName(fs *flagset) string {
+	return fs.str("name", os.Getenv("GMUX_NAME"))
 }
 
 func ps(args []string) error {

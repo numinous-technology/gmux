@@ -148,6 +148,7 @@ func (s *Server) exec(w http.ResponseWriter, r *http.Request, id string) {
 		Share   float64  `json:"share"`
 		MemMiB  int      `json:"mem_mib"`
 		Name    string   `json:"name"`
+		Owner   string   `json:"owner"`
 		Allow   []string `json:"allow"`
 		DenyNet bool     `json:"deny_net"`
 		Wait    bool     `json:"wait"`
@@ -186,7 +187,7 @@ func (s *Server) exec(w http.ResponseWriter, r *http.Request, id string) {
 	go scan(errR, "e")
 
 	job, done, err := s.d.SubmitStreaming(daemon.SubmitRequest{
-		Command: req.Command, Share: req.Share, MemMiB: req.MemMiB, Name: req.Name,
+		Command: req.Command, Share: req.Share, MemMiB: req.MemMiB, Name: req.Name, Owner: req.Owner,
 		Allow: req.Allow, DenyNet: req.DenyNet, Wait: req.Wait, Dir: ws,
 	}, outW, errW)
 	if err != nil {

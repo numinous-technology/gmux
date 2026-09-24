@@ -184,6 +184,7 @@ type ExecRequest struct {
 	Share   float64  `json:"share"`
 	MemMiB  int      `json:"mem_mib,omitempty"`
 	Name    string   `json:"name,omitempty"`
+	Owner   string   `json:"owner,omitempty"`
 	Allow   []string `json:"allow,omitempty"`
 	DenyNet bool     `json:"deny_net,omitempty"`
 	Wait    bool     `json:"wait,omitempty"`
