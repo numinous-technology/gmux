@@ -7,8 +7,8 @@ No root and no host access needed. If you can run Docker, you can run gmux, so
 it works on almost any GPU provider: RunPod, Vast, Lambda, a cloud VM, a
 university node, or your own box.
 
-Works with NVIDIA, AMD and Intel GPUs. What each one can enforce differs, and
-gmux tells you rather than pretending (see [Isolation](docs/isolation.md)).
+Works with NVIDIA, AMD and Intel GPUs. What each one can enforce differs;
+platform support is documented in [Isolation](docs/isolation.md).
 
 ## Why
 
