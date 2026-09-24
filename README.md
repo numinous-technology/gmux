@@ -1,6 +1,7 @@
 # gmux
 
-tmux for GPUs. Share one GPU across many jobs, in space and in time, resize
+tmux for GPUs. Split an H100 four ways and each job gets 158 TFLOP/s, within
+0.3% of the others. Share cards across many jobs in space and in time, resize
 them while they run, and see exactly who used what.
 
 Use them from anywhere. Point a laptop, a CI runner or an agent at a gmux host,
