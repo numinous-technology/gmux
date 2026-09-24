@@ -1,0 +1,4 @@
+/gmux
+/shim/libgmux.so
+/shim/shim_test
+*.o

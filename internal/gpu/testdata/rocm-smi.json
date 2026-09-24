@@ -1,0 +1,4 @@
+{"card0": {"Card Series": "AMD Instinct MI300X", "Card SKU": "M3000100", "Unique ID": "0x18f68e2be4c3d0a1", "VRAM Total Memory (B)": "206141652992", "VRAM Total Used Memory (B)": "293601280"},
+ "card1": {"Card series": "AMD Instinct MI250X", "Unique ID": "0x2a5c9e7d11b0f3e4", "VRAM Total Memory (B)": "68702699520", "VRAM Total Used Memory (B)": "11534336"},
+ "card2": {"Card Series": "Radeon RX 7900 XTX", "Unique ID": "0x3b6daf8e22c1f4f5", "VRAM Total Memory (B)": "25753026560", "VRAM Total Used Memory (B)": "536870912"},
+ "system": {"Driver version": "6.7.0"}}

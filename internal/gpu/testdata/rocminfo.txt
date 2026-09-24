@@ -1,0 +1,27 @@
+*******
+Agent 1
+*******
+  Name:                    AMD EPYC 9654 96-Core Processor
+  Device Type:             CPU
+  Compute Unit:            192
+*******
+Agent 2
+*******
+  Name:                    gfx942
+  Marketing Name:          AMD Instinct MI300X
+  Device Type:             GPU
+  Compute Unit:            304
+*******
+Agent 3
+*******
+  Name:                    gfx90a
+  Marketing Name:          AMD Instinct MI250X
+  Device Type:             GPU
+  Compute Unit:            110
+*******
+Agent 4
+*******
+  Name:                    gfx1100
+  Marketing Name:          Radeon RX 7900 XTX
+  Device Type:             GPU
+  Compute Unit:            96

@@ -1,0 +1,19 @@
+# Run gmux with a GPU. `docker compose up -d`, then:
+#   docker compose exec gmux gmux run --share 0.25 -- python train.py
+#   docker compose exec gmux gmux top
+services:
+  gmux:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    volumes:
+      - gmux-state:/var/lib/gmux
+volumes:
+  gmux-state:

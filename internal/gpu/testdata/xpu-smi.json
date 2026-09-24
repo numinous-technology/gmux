@@ -1,0 +1,5 @@
+{"device_list": [
+  {"device_id": 0, "device_name": "Intel(R) Data Center GPU Max 1550", "uuid": "01000000-0000-0000-0000-000000000001", "memory_physical_size_byte": "137438953472"},
+  {"device_id": 1, "device_name": "Intel(R) Data Center GPU Flex 170", "uuid": "01000000-0000-0000-0000-000000000002", "memory_physical_size_byte": "17179869184"},
+  {"device_id": 2, "device_name": "Intel(R) Arc(TM) A770 Graphics", "uuid": "01000000-0000-0000-0000-000000000003", "memory_physical_size_byte": "17163091968"}
+]}
