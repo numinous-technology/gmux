@@ -140,15 +140,25 @@ separate cards. The full picture is in [docs/isolation.md](docs/isolation.md).
 
 ## Benchmark
 
-Four jobs on one card, compared with running them one after another and with
-plain MPS. Reproduce with `bench/run.sh` on a real GPU. (Numbers go here once
-they are measured on hardware, not before.)
+Measured on one NVIDIA L40S (46 GB) through gmux. Each job runs a sustained
+fp16 8192-square matmul for 20 seconds, long enough that concurrent jobs
+genuinely overlap. Reproduce with `bench/run.sh`.
 
-| Setup | Total time | Card utilisation |
+| Setup | TFLOP/s per job | GPU memory the job can see |
 |---|---|---|
-| One at a time | | |
-| Plain MPS | | |
-| gmux | | |
+| One job, whole card, no gmux | 171.6 | 43.4 GiB |
+| One 1/4 share, alone on an idle card | 81.1 | 10.6 GiB |
+| Four 1/4 shares at once | 32.7, 32.7, 32.7, 32.7 | 10.6 GiB each |
+
+The memory cap is hard: every quarter share sees 10.6 GiB and cannot allocate
+past it. The split is fair: four concurrent shares got identical throughput.
+The compute cap holds: a quarter share alone cannot take the whole card.
+
+Sharing pays when jobs do not fill the card on their own: notebooks, bursty
+evals, small models serving a few requests. A single job that already
+saturates the card, like this matmul, runs fastest alone; four saturating
+shares add up to less than one dedicated job. The full transcript is in
+[docs/evidence/l40s-real-gpu.txt](docs/evidence/l40s-real-gpu.txt).
 
 ## How it works
 
@@ -174,17 +184,18 @@ pip install -e sdk/python             # the Python client
 
 Spatial and temporal sharing, admission, live resize, per-second accounting,
 the network fence, remote command execution, and multi-vendor detection are
-built and covered by tests. The scheduler, the session sync and remote run
-path, the accounting ledger, and the shim's memory accounting are exercised on
-every build. The network fence is a port of code that ran in production behind
-GPU agent trials.
+built and covered by tests on every build.
 
-The vendor backends drive each vendor's own tools (`nvidia-smi` and MPS,
-`rocm-smi` and CU masks, `xpu-smi`). The parsers are tested against recorded
-output from H100, A100, L4, RTX 4090, T4, MI300X, MI250X, RX 7900 XTX, Max
-1550, Flex 170 and Arc A770. `gmux cards` reports exactly what each card can
-enforce, so a vendor that supports admission only says so instead of implying a
-cap it cannot hold.
+On a real NVIDIA L40S, gmux detects the card, starts MPS, applies each job's
+compute and memory caps, splits the card fairly (the benchmark above), and
+enforces the network fence: `--deny-net` blocks everything, and `--allow`
+resolves and connects to allowlisted hosts while refusing the rest. See
+[docs/evidence/l40s-real-gpu.txt](docs/evidence/l40s-real-gpu.txt).
+
+The AMD and Intel backends drive `rocm-smi` and CU masks, and `xpu-smi`. Their
+parsers are tested against recorded output from MI300X, MI250X, RX 7900 XTX,
+Max 1550, Flex 170 and Arc A770, alongside H100, A100, L4, RTX 4090 and T4 on
+the NVIDIA side. `gmux cards` reports what each card can enforce.
 
 Preempt-and-resume through `cuda-checkpoint` is the next backend feature.
 

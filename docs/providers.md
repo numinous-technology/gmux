@@ -20,6 +20,22 @@ works on providers that only give you a container.
   set `GMUX_SHIM`.
 - **Intel (Level Zero):** device selection works; sharing is by admission only.
 
+## Verified end to end
+
+- **DigitalOcean GPU droplet, NVIDIA L40S.** A KVM VM with the card passed
+  through and a normal kernel. Real detection, MPS compute and memory caps,
+  the benchmark in the README, `--deny-net`, and the full `--allow` fence all
+  work. Transcript: [evidence/l40s-real-gpu.txt](evidence/l40s-real-gpu.txt).
+
+## Hosts that are themselves sandboxes
+
+Some providers run your container inside their own seccomp or gVisor sandbox
+(Modal, Thunder Compute). The scheduler, admission, accounting and
+`--deny-net` work there, but the kernel will not hand a second seccomp
+listener to a process that already sits under one, so `--allow` cannot arm.
+MPS may also be unavailable through a virtualised GPU. `gmux cards` reports
+what the host allows.
+
 ## Tested
 
 The vendor tool parsers are tested against recorded output from H100, A100,

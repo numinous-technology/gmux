@@ -256,9 +256,12 @@ type notifResp struct {
 	flags uint32
 }
 
+// addFD mirrors the kernel's struct seccomp_notif_addfd: a u64 id then four
+// u32s, 24 bytes. The id must be 64-bit; a 32-bit id shifts every later field
+// and the kernel rejects the call.
 type addFD struct {
-	id, flags, srcfd, newfd, newfdFlags uint32
-	_pad                                uint32
+	id                              uint64
+	flags, srcfd, newfd, newfdFlags uint32
 }
 
 func ioctl(fd int, req uintptr, arg unsafe.Pointer) error {
@@ -316,10 +319,18 @@ func (s *Supervisor) respond(id uint64, errno int32, val int64, flags uint32) {
 }
 
 func (s *Supervisor) cont(id uint64) { s.respond(id, 0, 0, notifFlagContinue) }
-func (s *Supervisor) deny(id uint64) { s.Refused++; s.respond(id, -eperm, 0, 0) }
+func (s *Supervisor) deny(id uint64) {
+	s.Refused++
+	if traceFence {
+		fmt.Fprintf(os.Stderr, "[fence]   -> DENY\n")
+	}
+	s.respond(id, -eperm, 0, 0)
+}
+
+var traceFence = os.Getenv("GMUX_FENCE_TRACE") != ""
 
 func (s *Supervisor) addfd(id uint64, srcfd int, newfd int, cloexec bool) (int, error) {
-	a := addFD{id: uint32(id), srcfd: uint32(srcfd)}
+	a := addFD{id: id, srcfd: uint32(srcfd)}
 	if newfd >= 0 {
 		a.flags = addfdFlagSetFD
 		a.newfd = uint32(newfd)
@@ -336,11 +347,17 @@ func (s *Supervisor) addfd(id uint64, srcfd int, newfd int, cloexec bool) (int, 
 
 // Serve answers notifications until the job is gone.
 func (s *Supervisor) Serve() {
+	if traceFence {
+		fmt.Fprintf(os.Stderr, "[fence] serve start fd=%d sizeof(notifReq)=%d\n", s.fd, unsafe.Sizeof(notifReq{}))
+	}
 	for {
 		var req notifReq
 		if err := ioctl(s.fd, notifRecv, unsafe.Pointer(&req)); err != nil {
 			if err == syscall.EINTR || err == syscall.EAGAIN {
 				continue
+			}
+			if traceFence {
+				fmt.Fprintf(os.Stderr, "[fence] serve exit: NOTIF_RECV error: %v (%d)\n", err, err)
 			}
 			return
 		}
@@ -350,6 +367,10 @@ func (s *Supervisor) Serve() {
 
 func (s *Supervisor) handle(req *notifReq) {
 	nr := uint32(req.nr)
+	if traceFence {
+		_, owned := s.table[uint32(req.args[0])]
+		fmt.Fprintf(os.Stderr, "[fence] nr=%d fd=%d owned=%v args1=%#x\n", nr, req.args[0], owned, req.args[1])
+	}
 	switch nr {
 	case s.sn.socket:
 		s.onSocket(req)

@@ -1,0 +1,25 @@
+gmux on a real NVIDIA L40S (46 GB, driver 580.173.02), DigitalOcean GPU droplet,
+KVM VM with GPU passthrough, Ubuntu, not sandboxed (Seccomp: 0). 2026-09-24.
+
+== detection ==
+CARD  VENDOR  GPU          MEMORY  ENFORCES
+0     nvidia  NVIDIA L40S  45.0G   concurrent, compute cap, memory cap
+(real nvidia backend, MPS control daemon started; no `checkpoint` because
+cuda-checkpoint is not installed on this host)
+
+== MPS caps applied per job ==
+0.25 share: CUDA_MPS_ACTIVE_THREAD_PERCENTAGE=25  CUDA_MPS_PINNED_DEVICE_MEM_LIMIT=0=11517M
+0.50 share: CUDA_MPS_ACTIVE_THREAD_PERCENTAGE=50  CUDA_MPS_PINNED_DEVICE_MEM_LIMIT=0=23034M
+
+== benchmark: sustained fp16 8192^2 matmul, 20 s each ==
+one job, whole card (no gmux)           171.6 TFLOP/s   43.4 GiB visible
+one 1/4 share, alone on an idle card     81.1 TFLOP/s   10.6 GiB visible
+four 1/4 shares, concurrent              32.7 / 32.7 / 32.7 / 32.7 TFLOP/s   10.6 GiB each
+accounting ledger recorded each job at 21 s
+
+== network fence ==
+seccomp NEW_LISTENER on this host: OK (listener fd=3)
+--deny-net:          connect 1.1.1.1:443 -> BLOCKED: PermissionError
+--allow example.com: DNS example.com -> 127.0.0.2 (the fence's DNS stub)
+                     example.com:443 TLS HEAD -> HTTP/1.1 200 OK (allowed, via the SNI proxy)
+                     1.1.1.1:443 (SNI one.one.one.one) -> refused (not on the allowlist)
