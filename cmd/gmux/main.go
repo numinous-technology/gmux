@@ -5,13 +5,17 @@ package main
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"fmt"
+	"net"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"text/tabwriter"
 	"time"
 
@@ -50,11 +54,13 @@ func main() {
 	case "run":
 		err = run(os.Args[2:])
 	case "ps":
-		err = ps()
+		err = ps(os.Args[2:])
 	case "top":
-		err = top()
+		err = top(os.Args[2:])
 	case "cards":
-		err = cards()
+		err = cards(os.Args[2:])
+	case "remote":
+		err = cmdRemote(os.Args[2:])
 	case "resize":
 		err = resize(os.Args[2:])
 	case "stop":
@@ -78,13 +84,16 @@ func main() {
 	}
 }
 
-var version = "0.1.0"
+var version = "0.2.0"
 
 func usage() {
-	fmt.Print(`gmux: share one GPU across many jobs, in space and time.
+	fmt.Print(`gmux: one pool of GPUs. Split each card among many jobs, and use the
+cards from machines that have none.
 
-  gmux serve [--fake SPEC] [--seats N]     start the daemon
-         [--addr :7070 --token SECRET]     also accept remote clients
+on a machine with a GPU:
+  gmux serve [--addr :7070]                start the daemon; --addr also serves
+                                           machines without a GPU (TLS, token)
+on any machine:
   gmux run --share F [opts] -- CMD...      run a job on a share of a GPU
   gmux ps                                  list jobs
   gmux top                                 cards and what is on them
@@ -92,6 +101,12 @@ func usage() {
   gmux resize ID --share F                 change a running job's share
   gmux stop ID                             stop a job
   gmux usage [--since 24h] [--by job]      who used what
+  gmux remote [ls|add|rm|default]          the GPU hosts this machine uses
+
+Where a command goes: --local, or --remote NAME, or a local daemon if one is
+running, or else the configured GPU hosts. On a machine without a GPU, gmux
+syncs the working directory to the host with the most room, runs the command
+there on its share, streams the output back, and stops the job on Ctrl-C.
 
 run options:
   --share F        fraction of one card, 0..1 (required)
@@ -104,11 +119,9 @@ run options:
   --wait           queue instead of failing when nothing fits
   --allow HOST     network allowlist (repeatable); everything else is refused
   --deny-net       no network at all
-
-run on a remote GPU host (no GPU needed locally):
-  --remote T@host:port   sync this directory there, run on its GPU, stream back
-  --pull GLOB            after the run, download result files matching GLOB
-  --session ID          reuse a named remote workspace (default: from the path)
+  --pull GLOB      on a GPU host: download result files matching GLOB after
+  --session ID     on a GPU host: reuse a named workspace (default: from the path)
+  --local, --remote NAME   choose where to run
 `)
 }
 
@@ -127,25 +140,37 @@ func serve(args []string) error {
 		fmt.Printf("  card %d  %s %s  %s  caps: %s\n", c.Index, c.Vendor, c.Name, share.FormatMem(c.MemMiB), capsLine(c.Caps))
 	}
 
-	// A remote listener lets GPU-less clients run commands on this host's
-	// GPUs. It needs a token; sessions live under the state dir.
+	// With --addr this host also serves machines without a GPU: over TLS with
+	// a certificate made once and pinned by clients, and a bearer token made
+	// once (or given). Both live in the state directory.
 	addr := fs.str("addr", os.Getenv("GMUX_ADDR"))
-	token := fs.str("token", os.Getenv("GMUX_TOKEN"))
-	var sess *session.Store
+	var (
+		sess  *session.Store
+		token string
+		cert  tls.Certificate
+		fp    string
+	)
 	if addr != "" {
+		token = fs.str("token", os.Getenv("GMUX_TOKEN"))
 		if token == "" {
-			return fmt.Errorf("--addr needs --token so remote clients can authenticate")
+			if token, err = api.LoadOrCreateToken(stateDir()); err != nil {
+				return err
+			}
 		}
-		sess, err = session.Open(filepath.Join(stateDir(), "sessions-store"))
-		if err != nil {
+		if cert, fp, err = api.LoadOrCreateCert(stateDir()); err != nil {
+			return err
+		}
+		if sess, err = session.Open(filepath.Join(stateDir(), "sessions-store")); err != nil {
 			return err
 		}
 	}
 	srv := api.New(d, sess, token)
 	if addr != "" {
-		fmt.Printf("gmux accepting remote clients on %s (bearer token required)\n", addr)
+		_, port, _ := net.SplitHostPort(addr)
+		fmt.Printf("gmux serving machines without a GPU on %s over TLS\n", addr)
+		fmt.Printf("  on each of them, run:\n    gmux remote add NAME %s@THIS-HOST:%s#%s\n", token, port, fp)
 		go func() {
-			if e := srv.ServeTCP(addr); e != nil {
+			if e := srv.ServeTCP(addr, cert); e != nil {
 				fmt.Fprintln(os.Stderr, "gmux: remote listener stopped: "+e.Error())
 			}
 		}()
@@ -171,8 +196,23 @@ func run(args []string) error {
 		}
 		mem = m
 	}
-	if target := fs.str("remote", os.Getenv("GMUX_REMOTE")); target != "" {
-		return runRemote(target, fs, cmd, shareF, mem)
+	// where to run: --local, --remote, a local daemon, else the GPU host
+	// with the most room
+	if !fs.bool("local") {
+		h, err := loadHosts()
+		if err != nil {
+			return err
+		}
+		if t := explicitRemote(fs, h); t != "" {
+			return runRemote(hostOf(t), t, fs, cmd, shareF, mem)
+		}
+		if !localUp() && len(h.Remotes) > 0 {
+			name, t, err := placeRemote(h, shareF, mem)
+			if err != nil {
+				return err
+			}
+			return runRemote(name, t, fs, cmd, shareF, mem)
+		}
 	}
 	req := daemon.SubmitRequest{
 		Command: cmd, Share: shareF, MemMiB: mem, GPUs: fs.intv("gpus", 0),
@@ -205,11 +245,14 @@ func run(args []string) error {
 
 // runRemote syncs the working directory to a gmux GPU host, runs the command
 // there on a share, streams the output back, and pulls result files.
-func runRemote(target string, fs *flagset, cmd []string, shareF float64, mem int) error {
+func runRemote(name, target string, fs *flagset, cmd []string, shareF float64, mem int) error {
 	c, err := remote.Dial(target)
 	if err != nil {
 		return err
 	}
+	// Ctrl-C closes the stream, and the host stops the job
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
 	dir, _ := os.Getwd()
 	sid, err := c.EnsureSession(fs.str("session", sessionFor(dir)))
 	if err != nil {
@@ -219,11 +262,15 @@ func runRemote(target string, fs *flagset, cmd []string, shareF float64, mem int
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "[gmux] synced %d files (%d new) to %s\n", nf, up, target)
-	exit, err := c.Exec(sid, remote.ExecRequest{
+	fmt.Fprintf(os.Stderr, "[gmux] %s: synced %d files (%d new)\n", name, nf, up)
+	exit, err := c.Exec(ctx, sid, remote.ExecRequest{
 		Command: cmd, Share: shareF, MemMiB: mem, Name: fs.str("name", ""),
 		Allow: fs.multiVals("allow"), DenyNet: fs.bool("deny-net"), Wait: fs.bool("wait"),
 	}, os.Stdout, os.Stderr)
+	if ctx.Err() != nil {
+		fmt.Fprintf(os.Stderr, "[gmux] interrupted; the job on %s was stopped\n", name)
+		os.Exit(130)
+	}
 	if err != nil {
 		return err
 	}
@@ -247,8 +294,12 @@ func sessionFor(dir string) string {
 	return "ws" + hex.EncodeToString(sum[:])[:12]
 }
 
-func ps() error {
-	jobs, err := api.Dial(sockPath()).Jobs()
+func ps(args []string) error {
+	c, _, err := pick(flags(args))
+	if err != nil {
+		return err
+	}
+	jobs, err := c.Jobs()
 	if err != nil {
 		return err
 	}
@@ -261,8 +312,14 @@ func ps() error {
 	return nil
 }
 
-func top() error {
-	c := api.Dial(sockPath())
+func top(args []string) error {
+	c, where, err := pick(flags(args))
+	if err != nil {
+		return err
+	}
+	if where != "local" {
+		fmt.Printf("on %s\n", where)
+	}
 	cv, err := c.Cards()
 	if err != nil {
 		return err
@@ -286,8 +343,15 @@ func top() error {
 	return nil
 }
 
-func cards() error {
-	cv, err := api.Dial(sockPath()).Cards()
+func cards(args []string) error {
+	c, where, err := pick(flags(args))
+	if err != nil {
+		return err
+	}
+	if where != "local" {
+		fmt.Printf("on %s\n", where)
+	}
+	cv, err := c.Cards()
 	if err != nil {
 		return err
 	}
@@ -314,7 +378,11 @@ func resize(args []string) error {
 		}
 		mem = m
 	}
-	job, err := api.Dial(sockPath()).Resize(id, fs.float("share", 0), mem)
+	c, _, err := pick(fs)
+	if err != nil {
+		return err
+	}
+	job, err := c.Resize(id, fs.float("share", 0), mem)
 	if err != nil {
 		return err
 	}
@@ -326,7 +394,11 @@ func stop(args []string) error {
 	if len(args) < 1 {
 		return fmt.Errorf("usage: gmux stop ID")
 	}
-	if err := api.Dial(sockPath()).Stop(args[0]); err != nil {
+	c, _, err := pick(flags(args[1:]))
+	if err != nil {
+		return err
+	}
+	if err := c.Stop(args[0]); err != nil {
 		return err
 	}
 	fmt.Printf("%s stopped\n", args[0])
@@ -335,7 +407,11 @@ func stop(args []string) error {
 
 func usageCmd(args []string) error {
 	fs := flags(args)
-	out, err := api.Dial(sockPath()).Usage(fs.str("since", "24h"), fs.str("by", "job"))
+	c, _, err := pick(fs)
+	if err != nil {
+		return err
+	}
+	out, err := c.Usage(fs.str("since", "24h"), fs.str("by", "job"))
 	if err != nil {
 		return err
 	}

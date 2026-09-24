@@ -9,7 +9,9 @@ import (
 	"bufio"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -20,7 +22,9 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
+	"github.com/numinous-technology/gmux/internal/daemon"
 	"github.com/numinous-technology/gmux/internal/session"
 )
 
@@ -31,19 +35,52 @@ type Client struct {
 	http  *http.Client
 }
 
-// Dial parses token@host:port (or a full http URL) into a client.
+// Dial parses a target, TOKEN@HOST:PORT#FINGERPRINT, into a client. With a
+// fingerprint the client speaks TLS and accepts only the host certificate with
+// that SHA-256 fingerprint (what `gmux serve` prints). Without one it speaks
+// plain HTTP, which is only for a host on the same trusted machine or network.
 func Dial(target string) (*Client, error) {
+	fp := ""
+	if i := strings.LastIndex(target, "#"); i >= 0 {
+		target, fp = target[:i], strings.ToLower(target[i+1:])
+	}
 	token := ""
 	if at := strings.LastIndex(target, "@"); at >= 0 {
 		token, target = target[:at], target[at+1:]
 	}
-	base := target
-	if !strings.HasPrefix(base, "http://") && !strings.HasPrefix(base, "https://") {
-		base = "http://" + base
+	target = strings.TrimPrefix(strings.TrimPrefix(target, "https://"), "http://")
+	if target == "" {
+		return nil, fmt.Errorf("no host in remote target")
 	}
-	return &Client{base: strings.TrimRight(base, "/"), token: token,
-		http: &http.Client{Timeout: 0}}, nil
+	c := &Client{token: token, http: &http.Client{}}
+	if fp == "" {
+		c.base = "http://" + strings.TrimRight(target, "/")
+		return c, nil
+	}
+	c.base = "https://" + strings.TrimRight(target, "/")
+	c.http.Transport = &http.Transport{TLSClientConfig: &tls.Config{
+		InsecureSkipVerify: true, // identity is checked by fingerprint below
+		MinVersion:         tls.VersionTLS12,
+		VerifyConnection: func(cs tls.ConnectionState) error {
+			if len(cs.PeerCertificates) == 0 {
+				return fmt.Errorf("gmux host sent no certificate")
+			}
+			sum := sha256.Sum256(cs.PeerCertificates[0].Raw)
+			if got := hex.EncodeToString(sum[:]); got != fp {
+				return fmt.Errorf("gmux host certificate fingerprint is %s, expected %s", got, fp)
+			}
+			return nil
+		},
+	}}
+	return c, nil
 }
+
+// Base is the host's address, for messages.
+func (c *Client) Base() string { return c.base }
+
+// SetTimeout bounds each request; control calls use it so an unreachable host
+// fails fast. Exec streams have no timeout.
+func (c *Client) SetTimeout(d time.Duration) { c.http.Timeout = d }
 
 func (c *Client) req(method, path string, body io.Reader, ctype string) (*http.Request, error) {
 	r, err := http.NewRequest(method, c.base+path, body)
@@ -144,10 +181,12 @@ type ExecRequest struct {
 }
 
 // Exec runs the command on the host and streams output to stdout/stderr,
-// returning the exit code.
-func (c *Client) Exec(id string, r ExecRequest, stdout, stderr io.Writer) (int, error) {
+// returning the exit code. Cancelling ctx closes the stream, and the host stops
+// the job.
+func (c *Client) Exec(ctx context.Context, id string, r ExecRequest, stdout, stderr io.Writer) (int, error) {
 	b, _ := json.Marshal(r)
 	req, _ := c.req("POST", "/v1/sessions/"+id+"/exec", bytes.NewReader(b), "application/json")
+	req = req.WithContext(ctx)
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return -1, err
@@ -266,4 +305,33 @@ func firstNonEmpty(a, b string) string {
 		return a
 	}
 	return b
+}
+
+// Control operations, the same endpoints the local CLI uses.
+
+// Cards reports the host's GPUs and what is free on each.
+func (c *Client) Cards() ([]daemon.CardView, error) {
+	var out struct{ Cards []daemon.CardView }
+	return out.Cards, c.doJSON("GET", "/v1/cards", nil, &out)
+}
+
+// Jobs lists the host's jobs.
+func (c *Client) Jobs() ([]daemon.Job, error) {
+	var out struct{ Jobs []daemon.Job }
+	return out.Jobs, c.doJSON("GET", "/v1/jobs", nil, &out)
+}
+
+// Stop ends a job on the host.
+func (c *Client) Stop(id string) error { return c.doJSON("DELETE", "/v1/jobs/"+id, nil, nil) }
+
+// Resize changes a job's share on the host.
+func (c *Client) Resize(id string, share float64, memMiB int) (*daemon.Job, error) {
+	var job daemon.Job
+	return &job, c.doJSON("POST", "/v1/jobs/"+id+"/resize", map[string]any{"share": share, "mem_mib": memMiB}, &job)
+}
+
+// Usage reports the host's accounting.
+func (c *Client) Usage(since, by string) (map[string]any, error) {
+	var out map[string]any
+	return out, c.doJSON("GET", "/v1/usage?since="+since+"&by="+by, nil, &out)
 }

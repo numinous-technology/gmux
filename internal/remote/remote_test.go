@@ -3,6 +3,7 @@ package remote_test
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"net"
 	"os"
 	"path/filepath"
@@ -32,12 +33,16 @@ func startHost(t *testing.T) string {
 		t.Fatal(err)
 	}
 	srv := api.New(d, store, "secret-token")
+	cert, fp, err := api.LoadOrCreateCert(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	go srv.ServeListener(ln)
-	return "secret-token@" + ln.Addr().String()
+	go srv.ServeListener(tls.NewListener(ln, &tls.Config{Certificates: []tls.Certificate{cert}}))
+	return "secret-token@" + ln.Addr().String() + "#" + fp
 }
 
 func TestRemoteRunRoundTrip(t *testing.T) {
@@ -66,7 +71,7 @@ func TestRemoteRunRoundTrip(t *testing.T) {
 
 	// run a command on the host that reads the synced file and writes a result
 	var out, errb bytes.Buffer
-	exit, err := c.Exec(sid, remote.ExecRequest{
+	exit, err := c.Exec(context.Background(), sid, remote.ExecRequest{
 		Command: []string{"sh", "-c", "cat input.txt; echo; echo done > result.txt"},
 		Share:   0.25,
 	}, &out, &errb)
@@ -100,7 +105,7 @@ func TestRemoteExecReportsExitCode(t *testing.T) {
 	sid, _ := c.EnsureSession("")
 	c.Sync(t.TempDir(), sid)
 	var out, errb bytes.Buffer
-	exit, err := c.Exec(sid, remote.ExecRequest{Command: []string{"sh", "-c", "exit 7"}, Share: 0.25}, &out, &errb)
+	exit, err := c.Exec(context.Background(), sid, remote.ExecRequest{Command: []string{"sh", "-c", "exit 7"}, Share: 0.25}, &out, &errb)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,12 +116,94 @@ func TestRemoteExecReportsExitCode(t *testing.T) {
 
 func TestRemoteRequiresToken(t *testing.T) {
 	target := startHost(t)
-	// strip the token
 	at := strings.Index(target, "@")
-	c, _ := remote.Dial(target[at+1:])
+	c, _ := remote.Dial(target[at+1:]) // no token
 	if _, err := c.EnsureSession(""); err == nil {
 		t.Fatal("a request without the bearer token must be refused")
 	}
+}
+
+func TestRemoteRefusesAnotherCertificate(t *testing.T) {
+	target := startHost(t)
+	wrong := target[:strings.LastIndex(target, "#")+1] + strings.Repeat("0", 64)
+	c, _ := remote.Dial(wrong)
+	if _, err := c.Cards(); err == nil || !strings.Contains(err.Error(), "fingerprint") {
+		t.Fatalf("a host whose certificate does not match the pinned fingerprint must be refused, got %v", err)
+	}
+	plain, _ := remote.Dial(target[:strings.LastIndex(target, "#")]) // plain http to a TLS host
+	if _, err := plain.Cards(); err == nil {
+		t.Fatal("plain HTTP must not reach a TLS host")
+	}
+}
+
+func TestRemoteControlOperations(t *testing.T) {
+	c, _ := remote.Dial(startHost(t))
+	cv, err := c.Cards()
+	if err != nil || len(cv) != 1 || cv[0].Name != "A100" {
+		t.Fatalf("cards: %+v %v", cv, err)
+	}
+	sid, _ := c.EnsureSession("")
+	c.Sync(t.TempDir(), sid)
+	go c.Exec(context.Background(), sid, remote.ExecRequest{Command: []string{"sleep", "30"}, Share: 0.5, Name: "long"}, &bytes.Buffer{}, &bytes.Buffer{})
+	var id string
+	for i := 0; i < 50 && id == ""; i++ {
+		time.Sleep(50 * time.Millisecond)
+		jobs, _ := c.Jobs()
+		for _, j := range jobs {
+			if j.Name == "long" && j.State == "running" {
+				id = j.ID
+			}
+		}
+	}
+	if id == "" {
+		t.Fatal("the remote job never showed as running")
+	}
+	if cv, _ := c.Cards(); cv[0].FreeSeats != 4 {
+		t.Fatalf("a half share should leave 4 of 8 seats, got %d", cv[0].FreeSeats)
+	}
+	if err := c.Stop(id); err != nil {
+		t.Fatal(err)
+	}
+	waitState(t, c, id, "exited")
+}
+
+func TestCancelledRemoteRunStopsTheJob(t *testing.T) {
+	c, _ := remote.Dial(startHost(t))
+	sid, _ := c.EnsureSession("")
+	c.Sync(t.TempDir(), sid)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		c.Exec(ctx, sid, remote.ExecRequest{Command: []string{"sleep", "60"}, Share: 0.25, Name: "ctrlc"}, &bytes.Buffer{}, &bytes.Buffer{})
+		close(done)
+	}()
+	var id string
+	for i := 0; i < 50 && id == ""; i++ {
+		time.Sleep(50 * time.Millisecond)
+		jobs, _ := c.Jobs()
+		for _, j := range jobs {
+			if j.Name == "ctrlc" && j.State == "running" {
+				id = j.ID
+			}
+		}
+	}
+	cancel() // what Ctrl-C does on the client
+	<-done
+	waitState(t, c, id, "exited")
+}
+
+func waitState(t *testing.T, c *remote.Client, id, want string) {
+	t.Helper()
+	for i := 0; i < 100; i++ {
+		jobs, _ := c.Jobs()
+		for _, j := range jobs {
+			if j.ID == id && j.State == want {
+				return
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("job %s never reached %s", id, want)
 }
 
 var _ = time.Second

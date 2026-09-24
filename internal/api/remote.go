@@ -205,13 +205,24 @@ func (s *Server) exec(w http.ResponseWriter, r *http.Request, id string) {
 	// pipes so the scanners drain, waits for them, reports the exit code, then
 	// closes the event stream.
 	final := make(chan int, 1)
+	finished := make(chan struct{})
 	go func() {
 		code := <-done
+		close(finished)
 		outW.Close()
 		errW.Close()
 		wg.Wait()
 		final <- code
 		close(events)
+	}()
+	// a client that goes away (Ctrl-C, a dropped connection) takes its job
+	// with it, like a local process whose terminal closed
+	go func() {
+		select {
+		case <-r.Context().Done():
+			s.d.Stop(job.ID)
+		case <-finished:
+		}
 	}()
 	for ev := range events {
 		emit(w, flusher, ev)

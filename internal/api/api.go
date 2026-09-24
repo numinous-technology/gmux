@@ -3,6 +3,7 @@
 package api
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"net"
 	"net/http"
@@ -66,14 +67,14 @@ func (s *Server) Serve(path string) error {
 	return srv.Serve(ln)
 }
 
-// ServeTCP listens on addr for remote clients, requiring the bearer token.
-func (s *Server) ServeTCP(addr string) error {
+// ServeTCP listens on addr for remote clients over TLS with cert, requiring
+// the bearer token on every request.
+func (s *Server) ServeTCP(addr string, cert tls.Certificate) error {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return err
 	}
-	srv := &http.Server{Handler: s.handler(), ReadHeaderTimeout: 30 * time.Second}
-	return srv.Serve(ln)
+	return s.ServeListener(tls.NewListener(ln, &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}))
 }
 
 // ServeListener serves an already-open listener (used by tests).
