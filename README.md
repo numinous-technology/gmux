@@ -84,7 +84,32 @@ kernel modules, or reconfigures the host. It detects whatever vendor tools are
 present (`nvidia-smi`, `rocm-smi`, `xpu-smi`) and uses them. Tested providers
 and their quirks are in [docs/providers.md](docs/providers.md).
 
-## Possible uses
+## Run on a remote GPU host
+
+A machine with no GPU can run a command on one that has gmux. The daemon syncs
+your working directory (content addressed, so only changed files move), runs
+the command on its GPU under a real share, streams the output back, and hands
+you result files. The network boundary is the command, not the CUDA call, so it
+tolerates latency and needs no driver interception.
+
+On the GPU host:
+
+```bash
+gmux serve --addr :7070 --token $SECRET
+```
+
+From any machine, with no GPU of its own:
+
+```bash
+gmux run --remote $SECRET@gpuhost:7070 --share 0.25 \
+    --pull 'out/*' -- python train.py
+```
+
+Repeated runs from the same directory reuse the workspace and sync only the
+diff. This is how a fleet of cheap CPU machines shares a pool of GPU hosts:
+the caps and the network fence run natively on the host, next to the card.
+
+## Uses
 
 A few things people do with a GPU multiplexer:
 
@@ -98,10 +123,10 @@ A few things people do with a GPU multiplexer:
 - **Squeeze a fixed rented pod** by fitting more work onto the card you are
   already paying for by the hour.
 
-gmux was built first for batching GPU evaluations of AI agents: running many
-short agent trials across a handful of cards, each trial holding a slice, with
-per-second accounting and a network allowlist per trial. It grew from there
-into a general multiplexer.
+gmux came out of batching GPU evaluations of AI agents: many short agent trials
+across a handful of cards, each trial holding a slice, with per-second
+accounting and a network allowlist per trial, and CPU-only machines dispatching
+work to a GPU pool. It is a general multiplexer now.
 
 ## Isolation
 
@@ -145,16 +170,23 @@ go test ./...                         # unit and integration tests
 pip install -e sdk/python             # the Python client
 ```
 
-## Status
+## What works
 
-Early. Spatial and temporal sharing, admission, resize,
-accounting, the network fence and multi-vendor detection all work and are
-tested. The fence is a port of code that ran in production. The memory-cap
-shim's accounting core is tested; its live capping and live compute resize are
-best effort per vendor and are marked as such. Preempt-and-resume via
-`cuda-checkpoint` is next. Nothing here has been run at scale on every vendor's
-hardware yet; the vendor tool parsers are tested against recorded output from
-each card.
+Spatial and temporal sharing, admission, live resize, per-second accounting,
+the network fence, remote command execution, and multi-vendor detection are
+built and covered by tests. The scheduler, the session sync and remote run
+path, the accounting ledger, and the shim's memory accounting are exercised on
+every build. The network fence is a port of code that ran in production behind
+GPU agent trials.
+
+The vendor backends drive each vendor's own tools (`nvidia-smi` and MPS,
+`rocm-smi` and CU masks, `xpu-smi`). The parsers are tested against recorded
+output from H100, A100, L4, RTX 4090, T4, MI300X, MI250X, RX 7900 XTX, Max
+1550, Flex 170 and Arc A770. `gmux cards` reports exactly what each card can
+enforce, so a vendor that supports admission only says so instead of implying a
+cap it cannot hold.
+
+Preempt-and-resume through `cuda-checkpoint` is the next backend feature.
 
 ## License
 

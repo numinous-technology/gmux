@@ -4,6 +4,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -17,6 +19,8 @@ import (
 	"github.com/numinous-technology/gmux/internal/daemon"
 	"github.com/numinous-technology/gmux/internal/fence"
 	"github.com/numinous-technology/gmux/internal/gpu"
+	"github.com/numinous-technology/gmux/internal/remote"
+	"github.com/numinous-technology/gmux/internal/session"
 	"github.com/numinous-technology/gmux/internal/share"
 )
 
@@ -80,6 +84,7 @@ func usage() {
 	fmt.Print(`gmux: share one GPU across many jobs, in space and time.
 
   gmux serve [--fake SPEC] [--seats N]     start the daemon
+         [--addr :7070 --token SECRET]     also accept remote clients
   gmux run --share F [opts] -- CMD...      run a job on a share of a GPU
   gmux ps                                  list jobs
   gmux top                                 cards and what is on them
@@ -99,6 +104,11 @@ run options:
   --wait           queue instead of failing when nothing fits
   --allow HOST     network allowlist (repeatable); everything else is refused
   --deny-net       no network at all
+
+run on a remote GPU host (no GPU needed locally):
+  --remote T@host:port   sync this directory there, run on its GPU, stream back
+  --pull GLOB            after the run, download result files matching GLOB
+  --session ID          reuse a named remote workspace (default: from the path)
 `)
 }
 
@@ -116,7 +126,31 @@ func serve(args []string) error {
 	for _, c := range cv {
 		fmt.Printf("  card %d  %s %s  %s  caps: %s\n", c.Index, c.Vendor, c.Name, share.FormatMem(c.MemMiB), capsLine(c.Caps))
 	}
-	return api.New(d).Serve(sockPath())
+
+	// A remote listener lets GPU-less clients run commands on this host's
+	// GPUs. It needs a token; sessions live under the state dir.
+	addr := fs.str("addr", os.Getenv("GMUX_ADDR"))
+	token := fs.str("token", os.Getenv("GMUX_TOKEN"))
+	var sess *session.Store
+	if addr != "" {
+		if token == "" {
+			return fmt.Errorf("--addr needs --token so remote clients can authenticate")
+		}
+		sess, err = session.Open(filepath.Join(stateDir(), "sessions-store"))
+		if err != nil {
+			return err
+		}
+	}
+	srv := api.New(d, sess, token)
+	if addr != "" {
+		fmt.Printf("gmux accepting remote clients on %s (bearer token required)\n", addr)
+		go func() {
+			if e := srv.ServeTCP(addr); e != nil {
+				fmt.Fprintln(os.Stderr, "gmux: remote listener stopped: "+e.Error())
+			}
+		}()
+	}
+	return srv.Serve(sockPath())
 }
 
 func run(args []string) error {
@@ -136,6 +170,9 @@ func run(args []string) error {
 			return err
 		}
 		mem = m
+	}
+	if target := fs.str("remote", os.Getenv("GMUX_REMOTE")); target != "" {
+		return runRemote(target, fs, cmd, shareF, mem)
 	}
 	req := daemon.SubmitRequest{
 		Command: cmd, Share: shareF, MemMiB: mem, GPUs: fs.intv("gpus", 0),
@@ -164,6 +201,50 @@ func run(args []string) error {
 	}
 	fmt.Printf("%s running on %s\n", job.ID, pl)
 	return nil
+}
+
+// runRemote syncs the working directory to a gmux GPU host, runs the command
+// there on a share, streams the output back, and pulls result files.
+func runRemote(target string, fs *flagset, cmd []string, shareF float64, mem int) error {
+	c, err := remote.Dial(target)
+	if err != nil {
+		return err
+	}
+	dir, _ := os.Getwd()
+	sid, err := c.EnsureSession(fs.str("session", sessionFor(dir)))
+	if err != nil {
+		return err
+	}
+	nf, up, err := c.Sync(dir, sid)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "[gmux] synced %d files (%d new) to %s\n", nf, up, target)
+	exit, err := c.Exec(sid, remote.ExecRequest{
+		Command: cmd, Share: shareF, MemMiB: mem, Name: fs.str("name", ""),
+		Allow: fs.multiVals("allow"), DenyNet: fs.bool("deny-net"), Wait: fs.bool("wait"),
+	}, os.Stdout, os.Stderr)
+	if err != nil {
+		return err
+	}
+	if pull := fs.multiVals("pull"); len(pull) > 0 {
+		n, err := c.Pull(sid, pull, dir)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "[gmux] pulled %d file(s)\n", n)
+	}
+	if exit != 0 {
+		os.Exit(exit)
+	}
+	return nil
+}
+
+// sessionFor derives a stable session id from a directory, so repeated runs
+// from the same folder reuse the same remote workspace and only sync changes.
+func sessionFor(dir string) string {
+	sum := sha256.Sum256([]byte(dir))
+	return "ws" + hex.EncodeToString(sum[:])[:12]
 }
 
 func ps() error {

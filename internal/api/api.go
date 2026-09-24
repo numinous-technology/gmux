@@ -7,29 +7,54 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/numinous-technology/gmux/internal/daemon"
+	"github.com/numinous-technology/gmux/internal/session"
 )
 
-// Server wraps a daemon with an HTTP mux over a unix socket.
+// Server wraps a daemon with an HTTP mux. It serves the local unix socket (the
+// CLI and SDK) and, when a token is set, a TCP port for remote clients that run
+// commands on this host's GPUs.
 type Server struct {
-	d   *daemon.Daemon
-	mux *http.ServeMux
+	d        *daemon.Daemon
+	mux      *http.ServeMux
+	sessions *session.Store
+	token    string
 }
 
-// New builds the server.
-func New(d *daemon.Daemon) *Server {
-	s := &Server{d: d, mux: http.NewServeMux()}
+// New builds the server. sessions and token may be nil/empty for a
+// local-only daemon; set them to accept remote clients.
+func New(d *daemon.Daemon, sessions *session.Store, token string) *Server {
+	s := &Server{d: d, mux: http.NewServeMux(), sessions: sessions, token: token}
 	s.mux.HandleFunc("/v1/jobs", s.jobs)
 	s.mux.HandleFunc("/v1/jobs/", s.job)
 	s.mux.HandleFunc("/v1/cards", s.cards)
 	s.mux.HandleFunc("/v1/usage", s.usage)
 	s.mux.HandleFunc("/v1/health", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, map[string]string{"status": "ok"}) })
+	s.mux.HandleFunc("/v1/sessions", s.sessionsCreate)
+	s.mux.HandleFunc("/v1/sessions/", s.session)
+	s.mux.HandleFunc("/v1/blobs/", s.blob)
 	return s
 }
 
-// Serve listens on a unix socket at path until the context process ends.
+// handler wraps the mux with bearer auth when a token is configured.
+func (s *Server) handler() http.Handler {
+	if s.token == "" {
+		return s.mux
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.EqualFold(r.Header.Get("Authorization"), "Bearer "+s.token) {
+			fail(w, 401, "a valid bearer token is required")
+			return
+		}
+		s.mux.ServeHTTP(w, r)
+	})
+}
+
+// Serve listens on a unix socket at path until the process ends. The local
+// socket is trusted and never requires the token.
 func (s *Server) Serve(path string) error {
 	os.Remove(path)
 	ln, err := net.Listen("unix", path)
@@ -38,6 +63,22 @@ func (s *Server) Serve(path string) error {
 	}
 	os.Chmod(path, 0o600)
 	srv := &http.Server{Handler: s.mux, ReadHeaderTimeout: 10 * time.Second}
+	return srv.Serve(ln)
+}
+
+// ServeTCP listens on addr for remote clients, requiring the bearer token.
+func (s *Server) ServeTCP(addr string) error {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+	srv := &http.Server{Handler: s.handler(), ReadHeaderTimeout: 30 * time.Second}
+	return srv.Serve(ln)
+}
+
+// ServeListener serves an already-open listener (used by tests).
+func (s *Server) ServeListener(ln net.Listener) error {
+	srv := &http.Server{Handler: s.handler(), ReadHeaderTimeout: 30 * time.Second}
 	return srv.Serve(ln)
 }
 

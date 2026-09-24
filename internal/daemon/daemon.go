@@ -6,6 +6,7 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -35,6 +36,9 @@ type Job struct {
 	req    scheduler.Request
 	submit SubmitRequest
 	proc   *runtime.Proc
+	stdout io.Writer // set for streaming (remote) exec, else os.Stdout
+	stderr io.Writer
+	done   chan int // closed with the exit code when the job ends
 }
 
 // Daemon holds everything.
@@ -49,6 +53,10 @@ type Daemon struct {
 	stateDir string
 	selfPath string
 	seats    int
+
+	// prepareStreaming, if set, attaches streaming output and a done channel to
+	// the next job created under d.mu (the remote exec path). Guarded by d.mu.
+	prepareStreaming *streamHook
 }
 
 type cardRef struct {
@@ -166,6 +174,10 @@ func (d *Daemon) Submit(r SubmitRequest) (*Job, error) {
 	}
 	job := &Job{ID: id, Name: r.Name, Owner: r.Owner, Command: r.Command, Share: r.Share,
 		Priority: r.Priority, req: req, submit: r}
+	if h := d.prepareStreaming; h != nil {
+		job.stdout, job.stderr, job.done = h.stdout, h.stderr, h.done
+		d.prepareStreaming = nil
+	}
 	d.jobs[id] = job
 	for _, victim := range dec.Preempt {
 		if v := d.jobs[victim]; v != nil && v.proc != nil {
@@ -203,7 +215,7 @@ func (d *Daemon) startLocked(job *Job, pl *scheduler.Placement) error {
 	proc, err := d.launch.Start(runtime.Spec{
 		ID: job.ID, Command: job.Command, Env: env, Dir: r.Dir,
 		Allow: r.Allow, DenyNet: r.DenyNet,
-		Stdout: os.Stdout, Stderr: os.Stderr, SelfPath: d.selfPath,
+		Stdout: job.outWriter(), Stderr: job.errWriter(), SelfPath: d.selfPath,
 	})
 	if err != nil {
 		return err
@@ -227,6 +239,11 @@ func (d *Daemon) reap(id string, proc *runtime.Proc) {
 	}
 	_, code := proc.Exited()
 	job.State, job.ExitCode = "exited", &code
+	if job.done != nil {
+		job.done <- code
+		close(job.done)
+		job.done = nil
+	}
 	job.proc = nil
 	d.ledger.End(id, time.Now())
 	for _, dec := range d.sched.Release(id) {

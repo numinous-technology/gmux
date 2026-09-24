@@ -9,6 +9,7 @@ package runtime
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"sort"
@@ -26,8 +27,8 @@ type Spec struct {
 	Dir      string
 	Allow    []string // network allowlist; empty means no fence
 	DenyNet  bool     // no network at all
-	Stdout   *os.File
-	Stderr   *os.File
+	Stdout   io.Writer
+	Stderr   io.Writer
 	SelfPath string // path to the gmux binary, for the fenced re-exec
 }
 

@@ -66,3 +66,25 @@ execs.
 Every stretch of a job holding a share is one interval, appended to a JSON
 lines file. A usage report clips intervals to the window and groups them by
 job, owner, card or vendor. The ledger survives a daemon restart.
+
+## Remote execution
+
+A GPU-less client can run a command on a gmux host. The design mirrors
+command-level remoting: the network boundary is the command, not the CUDA call.
+
+- `gmux serve --addr :7070 --token SECRET` opens a TCP listener alongside the
+  local unix socket. The token is required on every remote request; the local
+  socket stays trusted and unauthenticated.
+- A session is a workspace on the host. The client builds a manifest of its
+  working directory (path, sha256, size, exec bit), the host replies with the
+  blobs it does not already have, the client uploads only those, and the host
+  materialises the exact tree (with prune, so it matches the client).
+- Exec runs the command in that workspace as an ordinary gmux job, so it takes
+  a real share, its compute and memory caps, and its network fence, all applied
+  natively on the host next to the card. Output streams back as NDJSON
+  (`{"type":"o"/"e","d":line}`) and ends with `{"type":"exit","code":n}`.
+- Fetch returns a gzip tar of workspace files matching a set of globs.
+
+Because blobs are content addressed and shared across sessions, a second run
+from the same directory uploads only what changed. The caps and the fence never
+cross the network; only the command and its files do.
