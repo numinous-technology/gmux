@@ -11,6 +11,7 @@ import (
 	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -152,6 +153,14 @@ func (s *Store) Apply(id string, files []File, prune bool) error {
 	if err != nil {
 		return err
 	}
+	// what the last Apply wrote, so an unchanged file is not rewritten; a file
+	// the job has since changed (size or mtime differ) is rewritten
+	recPath := filepath.Join(filepath.Dir(ws), "applied.json")
+	applied := map[string]appliedFile{}
+	if b, err := os.ReadFile(recPath); err == nil {
+		json.Unmarshal(b, &applied)
+	}
+	next := map[string]appliedFile{}
 	wanted := map[string]bool{}
 	for _, f := range files {
 		rel, err := safeRel(f.Path)
@@ -163,19 +172,25 @@ func (s *Store) Apply(id string, files []File, prune bool) error {
 		}
 		wanted[rel] = true
 		dst := filepath.Join(ws, rel)
-		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-			return err
-		}
-		data, err := os.ReadFile(s.blobPath(f.SHA))
-		if err != nil {
-			return err
-		}
 		mode := os.FileMode(0o644)
 		if f.X {
 			mode = 0o755
 		}
-		if err := os.WriteFile(dst, data, mode); err != nil {
+		if prev, ok := applied[rel]; ok && prev.SHA == f.SHA {
+			if fi, err := os.Stat(dst); err == nil && fi.Size() == prev.Size && fi.ModTime().UnixNano() == prev.Mtime {
+				os.Chmod(dst, mode)
+				next[rel] = prev
+				continue
+			}
+		}
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 			return err
+		}
+		if err := copyBlob(s.blobPath(f.SHA), dst, mode); err != nil {
+			return err
+		}
+		if fi, err := os.Stat(dst); err == nil {
+			next[rel] = appliedFile{SHA: f.SHA, Size: fi.Size(), Mtime: fi.ModTime().UnixNano()}
 		}
 	}
 	if prune {
@@ -190,10 +205,39 @@ func (s *Store) Apply(id string, files []File, prune bool) error {
 			return nil
 		})
 	}
+	if b, err := json.Marshal(next); err == nil {
+		os.WriteFile(recPath, b, 0o644)
+	}
 	s.mu.Lock()
 	s.seen[id] = time.Now()
 	s.mu.Unlock()
 	return nil
+}
+
+type appliedFile struct {
+	SHA   string `json:"sha"`
+	Size  int64  `json:"size"`
+	Mtime int64  `json:"mtime"`
+}
+
+// copyBlob streams a blob into a workspace file. A copy, not a link: the job
+// may change its files, and the store must not change with them.
+func copyBlob(src, dst string, mode os.FileMode) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	os.Remove(dst) // a read-only file left by the job must not block the write
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	return out.Close()
 }
 
 // Fetch returns a gzip tarball of the workspace files matching the globs.
